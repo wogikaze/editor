@@ -1,72 +1,92 @@
 document.addEventListener("DOMContentLoaded", () => {
   class CanvasEditor {
     constructor(canvas, textarea) {
-      // --- コア要素とコンテキスト ---
       this.canvas = canvas;
       this.textarea = textarea;
       this.ctx = canvas.getContext("2d");
 
-      // --- エディタ設定 ---
       this.config = {
-        font: '22px "Space Mono", "Noto Sans JP", monospace',
-        padding: 10,
-        lineHeight: 30,
-        indentSize: 1,
-        bulletChar: "•",
+        padding: 12,
         blinkInterval: 500,
-        historyLimit: 100,
+        historyLimit: 200,
         colors: {
           background: "#282c34",
           text: "#abb2bf",
+          quoteText: "#6b717d",
           cursor: "#528bff",
           selection: "rgba(58, 67, 88, 0.8)",
           imeUnderline: "#abb2bf",
           indentation: "rgba(255, 255, 255, 0.08)",
           trailingSpace: "rgba(255, 82, 82, 0.3)",
+          link: "#61afef",
+          relativeLink: "#98c379",
           overwriteCursor: "rgba(82, 139, 255, 0.5)",
         },
       };
 
-      // --- エディタの状態 ---
-      this.text =
-        "インデントが1文字になりました。\n" +
-        " ".repeat(this.config.indentSize * 1) +
-        "Shift + Tabでデインデントします。\n" +
-        " ".repeat(this.config.indentSize * 2) +
-        "選択範囲の描画も改善されています。\n";
-      this.lines = [];
-      this.cursor = 0;
-      this.selectionStart = 0;
-      this.selectionEnd = 0;
+      this.state = this.createInitialState();
+
       this.isFocused = false;
       this.isDragging = false;
-      this.isOverwriteMode = false;
       this.isComposing = false;
       this.compositionText = "";
-      this.scrollY = 0;
-      this.visibleLines = 0;
-      this.preferredCursorX = -1; // 上下移動時のカーソルX座標を保持
       this.cursorBlinkState = true;
       this.lastBlinkTime = 0;
-      this.charWidthCache = new Map();
+      this.selectionAnchor = null;
+      this.preferredCursorX = -1;
 
-      // --- 履歴 (Undo/Redo) ---
-      this.undoStack = [];
-      this.redoStack = [];
-      this.isUndoingOrRedoing = false;
+      this.charWidthCache = new Map();
+      this.visibleLinesCache = null;
 
       this.init();
     }
 
-    // =========================================================================
-    // 初期化
-    // =========================================================================
+    createInitialState() {
+      const lines = [
+        this.createLine("インデントが1の次に3になる場合もあります。", 0),
+        this.createLine("Shift + Tabでインデントを戻せます。", 1),
+        this.createLine("選択範囲の描画も丁寧に行います。", 3),
+      ];
+      return {
+        lines,
+        cursor: { lineIndex: 0, charIndex: 0 },
+        selection: null,
+        history: { undoStack: [], redoStack: [] },
+        view: {
+          scrollTop: 0,
+          font: '22px "Space Mono", "Noto Sans JP", monospace',
+          lineHeight: 30,
+          indentWidth: 24,
+        },
+      };
+    }
+
+    createLine(text, indent = 0, collapsed = false) {
+      return {
+        id: CanvasEditor.generateId(),
+        text,
+        indent,
+        collapsed,
+      };
+    }
+    static generateId() {
+      if (typeof crypto !== "undefined" && crypto.randomUUID) {
+        return crypto.randomUUID();
+      }
+      return `line-${Date.now().toString(36)}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+    }
+
     init() {
-      this.ctx.font = this.config.font;
-      this.visibleLines = Math.floor(
-        (this.canvas.height - this.config.padding * 2) / this.config.lineHeight
+      this.ctx.font = this.state.view.font;
+      this.visibleLineCapacity = Math.max(
+        1,
+        Math.floor(
+          (this.canvas.height - this.config.padding * 2) /
+          this.state.view.lineHeight
+        )
       );
-      this.updateLines();
       this.bindEvents();
       requestAnimationFrame(this.renderLoop.bind(this));
     }
@@ -75,10 +95,17 @@ document.addEventListener("DOMContentLoaded", () => {
       this.canvas.addEventListener("mousedown", this.onMouseDown.bind(this));
       this.canvas.addEventListener("mousemove", this.onMouseMove.bind(this));
       window.addEventListener("mouseup", this.onMouseUp.bind(this));
-      this.canvas.addEventListener("wheel", this.onWheel.bind(this));
-      document.addEventListener("click", (e) => {
-        if (e.target !== this.canvas) this.blur();
+      this.canvas.addEventListener("wheel", this.onWheel.bind(this), {
+        passive: false,
       });
+      document.addEventListener("click", (e) => {
+        if (e.target !== this.canvas && e.target !== this.textarea) {
+          this.blur();
+        }
+      });
+
+      this.textarea.addEventListener("focus", () => this.focus());
+      this.textarea.addEventListener("blur", () => this.blur());
       this.textarea.addEventListener("input", this.onInput.bind(this));
       this.textarea.addEventListener("keydown", this.onKeydown.bind(this));
       this.textarea.addEventListener("compositionstart", () => {
@@ -90,191 +117,15 @@ document.addEventListener("DOMContentLoaded", () => {
       this.textarea.addEventListener("compositionend", (e) => {
         this.isComposing = false;
         this.compositionText = "";
-        this.onInput({ target: { value: e.data } });
+        if (e.data) {
+          this.insertText(e.data);
+        }
       });
       this.textarea.addEventListener("copy", this.onCopy.bind(this));
+      this.textarea.addEventListener("cut", this.onCut.bind(this));
       this.textarea.addEventListener("paste", this.onPaste.bind(this));
     }
 
-    // =========================================================================
-    // イベントハンドラ
-    // =========================================================================
-    onMouseDown(e) {
-      e.preventDefault();
-      this.focus();
-      this.isDragging = true;
-      const pos = this.getCursorIndexFromCoords(e.offsetX, e.offsetY);
-      this.setCursor(pos);
-      this.selectionStart = this.cursor;
-      this.selectionEnd = this.cursor;
-      this.preferredCursorX = -1;
-    }
-
-    onMouseMove(e) {
-      if (this.isDragging) {
-        const pos = this.getCursorIndexFromCoords(e.offsetX, e.offsetY);
-        this.setCursor(pos);
-        this.selectionEnd = this.cursor;
-      }
-    }
-
-    onMouseUp() {
-      this.isDragging = false;
-      this.preferredCursorX = -1;
-    }
-
-    onWheel(e) {
-      e.preventDefault();
-      const newScrollY = this.scrollY + e.deltaY;
-      const maxScrollY = Math.max(
-        0,
-        this.lines.length * this.config.lineHeight +
-        this.config.padding * 2 -
-        this.canvas.height
-      );
-      this.scrollY = Math.max(0, Math.min(newScrollY, maxScrollY));
-    }
-
-    onInput(e) {
-      if (this.isComposing) return;
-      let newText = e.target.value;
-      if (newText) {
-        const { row, col } = this.getPosFromIndex(this.cursor);
-        const line = this.lines[row];
-        if (newText === "　" && line.substring(0, col).trim() === "") {
-          newText = " ".repeat(this.config.indentSize);
-        }
-        this.insertText(newText);
-        this.textarea.value = "";
-      }
-    }
-
-    onKeydown(e) {
-      if (this.isComposing) return;
-      if (e.ctrlKey || e.metaKey) {
-        return this.handleCommandKeys(e);
-      }
-      switch (e.key) {
-        case "ArrowLeft":
-        case "ArrowRight":
-        case "ArrowUp":
-        case "ArrowDown":
-          e.preventDefault();
-          this.handleArrowKeys(e);
-          break;
-        case "Home":
-        case "End":
-          e.preventDefault();
-          this.handleHomeEndKeys(e);
-          break;
-        case "PageUp":
-        case "PageDown":
-          e.preventDefault();
-          this.handlePageKeys(e);
-          break;
-        case "Insert":
-          e.preventDefault();
-          this.isOverwriteMode = !this.isOverwriteMode;
-          this.resetCursorBlink();
-          break;
-        case "Backspace":
-          e.preventDefault();
-          this.handleBackspace();
-          break;
-        case "Delete":
-          e.preventDefault();
-          this.handleDelete();
-          break;
-        case "Enter":
-          e.preventDefault();
-          this.insertText("\n");
-          break;
-        case "Tab":
-          e.preventDefault();
-          this.insertText("\t");
-          break;
-        default:
-          this.preferredCursorX = -1;
-          break;
-      }
-    }
-
-    onCopy(e) {
-      e.preventDefault();
-      if (!this.hasSelection()) return;
-      const { start, end } = this.getSelectionRange();
-      e.clipboardData.setData("text/plain", this.text.substring(start, end));
-    }
-
-    onPaste(e) {
-      e.preventDefault();
-      const pasteText = e.clipboardData.getData("text/plain");
-      if (pasteText) {
-        this.insertText(pasteText);
-      }
-    }
-
-    // =========================================================================
-    // キー入力処理のヘルパー
-    // =========================================================================
-    handleCommandKeys(e) {
-      switch (e.key.toLowerCase()) {
-        case "a": // 全選択
-          e.preventDefault();
-          this.selectionStart = 0;
-          this.selectionEnd = this.text.length;
-          this.setCursor(this.text.length);
-          break;
-        case "z": // 元に戻す
-          e.preventDefault();
-          this.undo();
-          break;
-        case "y": // やり直し
-          e.preventDefault();
-          this.redo();
-          break;
-      }
-    }
-
-    handleBackspace() {
-      if (this.hasSelection()) {
-        return this.deleteSelection();
-      }
-      if (this.cursor === 0) return;
-
-      this.saveState();
-      const { row, col } = this.getPosFromIndex(this.cursor);
-      const line = this.lines[row];
-      const isAtIndentBoundary =
-        col > 0 &&
-        col % this.config.indentSize === 0 &&
-        line.substring(0, col).trim() === "";
-
-      const deleteSize = isAtIndentBoundary ? this.config.indentSize : 1;
-      const prevCursor = this.cursor;
-      this.text =
-        this.text.slice(0, prevCursor - deleteSize) +
-        this.text.slice(prevCursor);
-      this.setCursor(prevCursor - deleteSize);
-      this.selectionStart = this.selectionEnd = this.cursor;
-      this.updateLines();
-    }
-
-    handleDelete() {
-      if (this.hasSelection()) {
-        return this.deleteSelection();
-      }
-      if (this.cursor < this.text.length) {
-        this.saveState();
-        this.text =
-          this.text.slice(0, this.cursor) + this.text.slice(this.cursor + 1);
-        this.updateLines();
-      }
-    }
-
-    // =========================================================================
-    // 描画処理
-    // =========================================================================
     renderLoop(timestamp) {
       this.updateCursorBlink(timestamp);
       this.render();
@@ -286,112 +137,219 @@ document.addEventListener("DOMContentLoaded", () => {
       this.ctx.fillStyle = this.config.colors.background;
       this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
       this.ctx.save();
-      this.ctx.translate(0, -this.scrollY);
+      this.ctx.translate(0, -this.state.view.scrollTop);
 
-      const selection = this.getSelectionRange();
-      this.lines.forEach((line, i) => {
-        const y = this.config.padding + i * this.config.lineHeight;
+      const visibleLines = this.getVisibleLines();
+      const lineHeight = this.state.view.lineHeight;
+      visibleLines.forEach((lineIndex, visibleIndex) => {
+        const line = this.state.lines[lineIndex];
+        const y =
+          this.config.padding + visibleIndex * lineHeight;
         if (
-          y + this.config.lineHeight < this.scrollY ||
-          y > this.scrollY + this.canvas.height
-        )
+          y + lineHeight < this.state.view.scrollTop - this.config.padding ||
+          y > this.state.view.scrollTop + this.canvas.height
+        ) {
           return;
-
-        this.renderLineBackground(line, i, y, selection);
-        this.renderLineText(line, i, y);
+        }
+        this.renderLine(line, lineIndex, visibleIndex, y);
       });
+
       this.renderCursor();
+
+      if (this.isFocused && this.isComposing) {
+        this.renderCompositionText();
+      }
+
       this.ctx.restore();
     }
 
-    renderLineBackground(line, lineIndex, y, selection) {
-      const lineStartIndex = this.getIndexFromPos(lineIndex, 0);
-      let currentX = this.config.padding;
-      const lastNonSpaceIndex = (line.match(/\s*$/)?.index ?? line.length) - 1;
+    renderLine(line, lineIndex, visibleIndex, y) {
+      this.renderIndentBackground(line, y);
+      this.renderSelection(lineIndex, y);
+      this.renderCollapseIcon(line, lineIndex, y);
+      this.renderLineText(line, lineIndex, y);
+    }
 
-      for (let j = 0; j < line.length; j++) {
-        const char = line[j];
-        const charWidth = this.getCharWidth(char);
-        const charIndex = lineStartIndex + j;
-
-        if (charIndex >= selection.start && charIndex < selection.end) {
-          this.ctx.fillStyle = this.config.colors.selection;
-          this.ctx.fillRect(currentX, y, charWidth, this.config.lineHeight);
-        } else if (char === " " && line.substring(0, j + 1).trim() === "") {
-          this.ctx.fillStyle = this.config.colors.indentation;
-          this.ctx.fillRect(currentX, y, charWidth, this.config.lineHeight);
-        } else if (char === " " && j > lastNonSpaceIndex) {
-          this.ctx.fillStyle = this.config.colors.trailingSpace;
-          this.ctx.fillRect(currentX, y, charWidth, this.config.lineHeight);
-        }
-        currentX += charWidth;
+    renderIndentBackground(line, y) {
+      const indentWidth = this.state.view.indentWidth;
+      for (let level = 0; level < line.indent; level += 1) {
+        const x = this.config.padding + level * indentWidth;
+        this.ctx.fillStyle = this.config.colors.indentation;
+        this.ctx.fillRect(
+          x,
+          y,
+          Math.max(1, indentWidth - 4),
+          this.state.view.lineHeight
+        );
       }
+    }
+
+    renderSelection(lineIndex, y) {
+      const selection = this.getNormalizedSelection();
+      if (!selection) return;
+      const { start, end } = selection;
+      if (lineIndex < start.lineIndex || lineIndex > end.lineIndex) return;
+
+      const line = this.state.lines[lineIndex];
+      const lineHeight = this.state.view.lineHeight;
+      const indentX =
+        this.config.padding + line.indent * this.state.view.indentWidth;
+      let selectionStartX = indentX;
+      let selectionEndX = indentX;
+
+      const startIndex =
+        lineIndex === start.lineIndex ? start.charIndex : 0;
+      const endIndex =
+        lineIndex === end.lineIndex ? end.charIndex : line.text.length;
+
+      if (startIndex === endIndex && startIndex === 0 && lineIndex !== end.lineIndex) {
+        selectionEndX = indentX + this.measureText(line.text);
+      } else {
+        selectionStartX =
+          indentX + this.measureText(line.text.slice(0, startIndex));
+        selectionEndX =
+          indentX + this.measureText(line.text.slice(0, endIndex));
+      }
+
+      this.ctx.fillStyle = this.config.colors.selection;
+      this.ctx.fillRect(
+        selectionStartX,
+        y,
+        Math.max(2, selectionEndX - selectionStartX),
+        lineHeight
+      );
+    }
+
+    renderCollapseIcon(line, lineIndex, y) {
+      if (!this.hasChildren(lineIndex)) return;
+      const indentWidth = this.state.view.indentWidth;
+      const iconX =
+        this.config.padding +
+        line.indent * indentWidth -
+        indentWidth * 0.7;
+      const iconY = y + this.state.view.lineHeight / 2 + 4;
+      this.ctx.fillStyle = this.config.colors.text;
+      const icon = line.collapsed ? "▶" : "▼";
+      this.ctx.fillText(icon, iconX, iconY);
     }
 
     renderLineText(line, lineIndex, y) {
-      const textY = y + this.config.lineHeight / 2;
-      this.ctx.fillStyle = this.config.colors.text;
-      this.ctx.textBaseline = "middle";
+      const indentWidth = this.state.view.indentWidth;
+      const indentX =
+        this.config.padding + line.indent * indentWidth;
+      const baseline = y + this.state.view.lineHeight / 2 + 1;
+      const segments = this.getRenderedSegments(line, lineIndex);
+      let cursorX = indentX;
 
-      const leadingSpaces = line.search(/\S|$/);
-      if (leadingSpaces >= this.config.indentSize) {
-        const bulletX =
-          this.config.padding +
-          this.measureText(line.substring(0, leadingSpaces)) -
-          this.measureText(" ".repeat(this.config.indentSize)) / 2;
-        this.ctx.fillText(
-          this.config.bulletChar,
-          bulletX - this.measureText(this.config.bulletChar) / 2,
-          textY
-        );
-      }
-
-      this.drawTextWithKerning(line, this.config.padding, textY);
-
-      if (
-        this.isFocused &&
-        this.isComposing &&
-        this.getPosFromIndex(this.cursor).row === lineIndex
-      ) {
-        this.renderCompositionText(line, y);
+      segments.forEach((segment) => {
+        this.ctx.fillStyle = this.getSegmentColor(segment);
+        this.ctx.fillText(segment.displayText, cursorX, baseline);
+        cursorX += this.measureText(segment.displayText);
+      });
+    }
+    renderCursor() {
+      if (!this.isFocused || this.isComposing) return;
+      const { x, y, line } = this.getCursorCoords();
+      if (!line) return;
+      const lineHeight = this.state.view.lineHeight;
+      if (this.cursorBlinkState) {
+        this.ctx.fillStyle = this.config.colors.cursor;
+        this.ctx.fillRect(x, y, 2, lineHeight);
       }
     }
 
-    renderCompositionText(line, y) {
-      const { col } = this.getPosFromIndex(this.cursor);
-      const textY = y + this.config.lineHeight / 2;
-      const imeRenderX =
-        this.config.padding + this.measureText(line.substring(0, col));
-      this.drawTextWithKerning(this.compositionText, imeRenderX, textY);
-      const compositionWidth = this.measureText(this.compositionText);
+    renderCompositionText() {
+      const { x, y } = this.getCursorCoords();
+      const baseline = y + this.state.view.lineHeight / 2 + 1;
+      this.ctx.fillStyle = this.config.colors.text;
+      this.ctx.fillText(this.compositionText, x, baseline);
+      const width = this.measureText(this.compositionText);
       this.ctx.strokeStyle = this.config.colors.imeUnderline;
       this.ctx.lineWidth = 1;
       this.ctx.beginPath();
-      this.ctx.moveTo(imeRenderX, y + this.config.lineHeight - 2);
-      this.ctx.lineTo(
-        imeRenderX + compositionWidth,
-        y + this.config.lineHeight - 2
-      );
+      this.ctx.moveTo(x, y + this.state.view.lineHeight - 2);
+      this.ctx.lineTo(x + width, y + this.state.view.lineHeight - 2);
       this.ctx.stroke();
     }
 
-    renderCursor() {
-      if (!this.isFocused || this.isComposing) return;
-      const cursorPos = this.getCursorCoords(this.cursor);
-      if (this.isOverwriteMode) {
-        const char = this.text[this.cursor] || " ";
-        const charWidth = this.getCharWidth(char);
-        this.ctx.fillStyle = this.config.colors.overwriteCursor;
-        this.ctx.fillRect(cursorPos.x, cursorPos.y, charWidth, this.config.lineHeight);
-      } else if (this.cursorBlinkState) {
-        this.ctx.fillStyle = this.config.colors.cursor;
-        this.ctx.fillRect(cursorPos.x, cursorPos.y, 2, this.config.lineHeight);
+    getSegmentColor(segment) {
+      if (segment.isQuote) return this.config.colors.quoteText;
+      if (segment.isLink) return this.config.colors.link;
+      if (segment.isRelativeLink) return this.config.colors.relativeLink;
+      return this.config.colors.text;
+    }
+
+    getRenderedSegments(line, lineIndex) {
+      const isActiveLine = lineIndex === this.state.cursor.lineIndex;
+      const segments = [];
+      const text = line.text;
+      const trimmed = text.trimStart();
+      const isQuote = trimmed.startsWith(">");
+      let i = 0;
+
+      while (i < text.length) {
+        const nextLinkIndex = text.indexOf("https://", i);
+        const nextBracketIndex = text.indexOf("[", i);
+        let nextIndex = text.length;
+        let tokenType = null;
+
+        if (nextLinkIndex !== -1 && nextLinkIndex < nextIndex) {
+          nextIndex = nextLinkIndex;
+          tokenType = "link";
+        }
+        if (nextBracketIndex !== -1 && nextBracketIndex < nextIndex) {
+          nextIndex = nextBracketIndex;
+          tokenType = "relative";
+        }
+
+        if (nextIndex > i) {
+          const displayText = text.slice(i, nextIndex);
+          segments.push({ displayText, isQuote });
+          i = nextIndex;
+        } else {
+          if (!tokenType) break;
+          if (tokenType === "link") {
+            const match = text.slice(i).match(/^https:\/\/\S+/);
+            const linkText = match ? match[0] : "https://";
+            segments.push({ displayText: linkText, isLink: true, isQuote });
+            i += linkText.length;
+          } else if (tokenType === "relative") {
+            const closingIndex = text.indexOf("]", i + 1);
+            if (closingIndex === -1) {
+              segments.push({ displayText: text.slice(i), isQuote });
+              break;
+            }
+            const label = text.slice(i + 1, closingIndex);
+            if (isActiveLine) {
+              segments.push({ displayText: `[${label}]`, isQuote });
+            } else {
+              segments.push({ displayText: label, isRelativeLink: true, isQuote });
+            }
+            i = closingIndex + 1;
+          }
+        }
+      }
+
+      if (segments.length === 0) {
+        segments.push({ displayText: text, isQuote });
+      }
+
+      return segments;
+    }
+
+    updateCursorBlink(timestamp) {
+      if (!this.isFocused) return;
+      if (timestamp - this.lastBlinkTime > this.config.blinkInterval) {
+        this.cursorBlinkState = !this.cursorBlinkState;
+        this.lastBlinkTime = timestamp;
       }
     }
 
-    // =========================================================================
-    // テキストと状態の操作
-    // =========================================================================
+    resetCursorBlink() {
+      this.cursorBlinkState = true;
+      this.lastBlinkTime = performance.now();
+    }
+
     focus() {
       if (this.isFocused) return;
       this.isFocused = true;
@@ -404,209 +362,977 @@ document.addEventListener("DOMContentLoaded", () => {
       this.textarea.blur();
     }
 
-    insertText(newText) {
-      this.saveState();
-      if (this.hasSelection()) {
-        this.deleteSelection(false); // 履歴の二重保存を防ぐ
+    onMouseDown(e) {
+      e.preventDefault();
+      this.focus();
+      const { lineIndex, charIndex, clickedIcon } = this.hitTest(
+        e.offsetX,
+        e.offsetY
+      );
+      if (lineIndex === null) return;
+      if (clickedIcon) {
+        this.toggleCollapse(lineIndex);
+        return;
       }
-      const prevCursor = this.cursor;
-      if (
-        this.isOverwriteMode &&
-        this.cursor < this.text.length &&
-        newText !== "\n"
-      ) {
-        const end = prevCursor + newText.length;
-        this.text = this.text.slice(0, prevCursor) + newText + this.text.slice(end);
-      } else {
-        this.text =
-          this.text.slice(0, prevCursor) + newText + this.text.slice(prevCursor);
+      this.setCursor(lineIndex, charIndex);
+      this.selectionAnchor = { ...this.state.cursor };
+      this.isDragging = true;
+    }
+
+    onMouseMove(e) {
+      if (!this.isDragging) return;
+      e.preventDefault();
+      const hit = this.hitTest(e.offsetX, e.offsetY);
+      if (hit.lineIndex === null) return;
+      this.setCursor(hit.lineIndex, hit.charIndex, {
+        resetSelection: false,
+        scrollIntoView: false,
+      });
+      if (this.selectionAnchor) {
+        this.state.selection = {
+          start: { ...this.selectionAnchor },
+          end: { ...this.state.cursor },
+        };
       }
-      this.setCursor(prevCursor + newText.length);
-      this.selectionStart = this.selectionEnd = this.cursor;
-      this.updateLines();
+      this.ensureCursorVisibleWhileDragging(e.offsetY);
+    }
+
+    onMouseUp() {
+      this.isDragging = false;
       this.preferredCursorX = -1;
     }
 
-    deleteSelection(save = true) {
-      if (!this.hasSelection()) return;
-      if (save) this.saveState();
-      const { start, end } = this.getSelectionRange();
-      this.text = this.text.slice(0, start) + this.text.slice(end);
-      this.setCursor(start);
-      this.selectionStart = this.selectionEnd = this.cursor;
-      this.updateLines();
+    onWheel(e) {
+      e.preventDefault();
+      const maxScroll = this.getMaxScroll();
+      const next = this.state.view.scrollTop + e.deltaY;
+      this.state.view.scrollTop = Math.max(0, Math.min(maxScroll, next));
     }
 
-    updateLines() {
-      this.lines = this.text.split("\n");
+    onInput(e) {
+      if (this.isComposing) return;
+      const value = e.target.value;
+      if (!value) return;
+      this.insertText(value.replace(/\r\n/g, "\n"));
+      this.textarea.value = "";
     }
 
-    updateCursorBlink(timestamp) {
-      if (!this.isFocused) return;
-      if (timestamp - this.lastBlinkTime > this.config.blinkInterval) {
-        this.cursorBlinkState = !this.cursorBlinkState;
-        this.lastBlinkTime = timestamp;
+    onKeydown(e) {
+      if (this.isComposing) return;
+      const ctrl = e.ctrlKey || e.metaKey;
+      const shift = e.shiftKey;
+      const key = e.key;
+
+      if (ctrl && this.handleCtrlShortcuts(e, key, shift)) {
+        return;
       }
-    }
 
-    resetCursorBlink() {
-      this.lastBlinkTime = performance.now();
-      this.cursorBlinkState = true;
-    }
-
-    // =========================================================================
-    // カーソルと選択範囲の移動
-    // =========================================================================
-    setCursor(index, resetX = true) {
-      this.cursor = Math.max(0, Math.min(this.text.length, index));
-      if (resetX) {
-        this.preferredCursorX = -1;
-      }
-      this.scrollToCursor();
-      this.resetCursorBlink();
-    }
-
-    handleArrowKeys(e) {
-      const originalCursor = this.cursor;
-      switch (e.key) {
+      switch (key) {
         case "ArrowLeft":
-          this.setCursor(this.cursor > 0 ? this.cursor - 1 : 0);
+          e.preventDefault();
+          this.moveCursorHorizontal(-1, shift);
           break;
         case "ArrowRight":
-          this.setCursor(
-            this.cursor < this.text.length ? this.cursor + 1 : this.text.length
-          );
+          e.preventDefault();
+          this.moveCursorHorizontal(1, shift);
           break;
         case "ArrowUp":
-          this.moveCursorLine(-1);
+          e.preventDefault();
+          this.moveCursorVertical(-1, shift);
           break;
         case "ArrowDown":
-          this.moveCursorLine(1);
+          e.preventDefault();
+          this.moveCursorVertical(1, shift);
+          break;
+        case "Home":
+          e.preventDefault();
+          this.moveCursorToLineEdge("start", shift);
+          break;
+        case "End":
+          e.preventDefault();
+          this.moveCursorToLineEdge("end", shift);
+          break;
+        case "PageUp":
+          e.preventDefault();
+          this.moveCursorVertical(-this.visibleLineCapacity, shift);
+          break;
+        case "PageDown":
+          e.preventDefault();
+          this.moveCursorVertical(this.visibleLineCapacity, shift);
+          break;
+        case "Enter":
+          e.preventDefault();
+          if (shift) {
+            this.insertLineBreak({ indent: 0 });
+          } else {
+            this.insertLineBreak();
+          }
+          break;
+        case "Tab":
+          e.preventDefault();
+          if (shift) {
+            this.changeIndent(-1, { applyToSelection: this.hasSelection() });
+          } else {
+            this.changeIndent(1, { applyToSelection: this.hasSelection() });
+          }
+          break;
+        case "Backspace":
+          e.preventDefault();
+          this.handleBackspace();
+          break;
+        case "Delete":
+          e.preventDefault();
+          this.handleDelete();
+          break;
+        case " ":
+          if (this.state.cursor.charIndex === 0) {
+            e.preventDefault();
+            this.changeIndent(1, { applyToSelection: this.hasSelection() });
+          }
+          break;
+        case "[":
+          e.preventDefault();
+          this.insertBracketPair();
+          break;
+        default:
+          this.preferredCursorX = -1;
           break;
       }
-      if (e.shiftKey) {
-        this.selectionEnd = this.cursor;
+    }
+
+    handleCtrlShortcuts(e, key, shift) {
+      const lower = key.toLowerCase();
+      switch (lower) {
+        case "a":
+          e.preventDefault();
+          this.selectAll();
+          return true;
+        case "z":
+          e.preventDefault();
+          if (shift) {
+            this.redo();
+          } else {
+            this.undo();
+          }
+          return true;
+        case "y":
+          e.preventDefault();
+          this.redo();
+          return true;
+        case "home":
+          e.preventDefault();
+          this.moveCursorToDocumentEdge("start", shift);
+          return true;
+        case "end":
+          e.preventDefault();
+          this.moveCursorToDocumentEdge("end", shift);
+          return true;
+        case "arrowup":
+          e.preventDefault();
+          this.moveBlock(-1);
+          return true;
+        case "arrowdown":
+          e.preventDefault();
+          this.moveBlock(1);
+          return true;
+        case "arrowleft":
+          e.preventDefault();
+          if (shift) {
+            this.moveCursorByWord(-1, true);
+          } else {
+            this.changeIndent(-1, { applyToSelection: this.hasSelection() });
+          }
+          return true;
+        case "arrowright":
+          e.preventDefault();
+          if (shift) {
+            this.moveCursorByWord(1, true);
+          } else {
+            this.changeIndent(1, { applyToSelection: this.hasSelection() });
+          }
+          return true;
+        case "enter":
+          e.preventDefault();
+          this.toggleCollapse(this.state.cursor.lineIndex);
+          return true;
+        case "tab":
+          e.preventDefault();
+          this.changeIndent(1, { applyToSelection: this.hasSelection() });
+          return true;
+        case "x":
+        case "c":
+        case "v":
+          return false;
+        default:
+          return false;
+      }
+    }
+    onCopy(e) {
+      const text = this.getSelectedText();
+      if (!text) return;
+      e.preventDefault();
+      e.clipboardData.setData("text/plain", text);
+    }
+
+    onCut(e) {
+      const text = this.getSelectedText();
+      if (!text) return;
+      e.preventDefault();
+      e.clipboardData.setData("text/plain", text);
+      this.deleteSelection();
+    }
+
+    onPaste(e) {
+      e.preventDefault();
+      const paste = e.clipboardData.getData("text/plain");
+      if (!paste) return;
+      this.insertText(paste.replace(/\r\n/g, "\n"));
+    }
+
+    insertText(text) {
+      if (!text) return;
+      this.saveHistory();
+      if (this.state.selection) {
+        this.collapseSelectionWithoutHistory();
+      }
+      const cursor = this.state.cursor;
+      const line = this.state.lines[cursor.lineIndex];
+      const tail = line.text.slice(cursor.charIndex);
+      const head = line.text.slice(0, cursor.charIndex);
+      const parts = text.split("\n");
+
+      if (parts.length === 1) {
+        line.text = head + text + tail;
+        this.setCursor(cursor.lineIndex, cursor.charIndex + text.length);
+        return;
+      }
+
+      line.text = head + parts[0];
+      let insertIndex = cursor.lineIndex + 1;
+      const indent = line.indent;
+      for (let i = 1; i < parts.length; i += 1) {
+        const part = parts[i];
+        const newLineText =
+          i === parts.length - 1 ? part + tail : part;
+        const newLine = this.createLine(newLineText, indent, false);
+        this.state.lines.splice(insertIndex, 0, newLine);
+        insertIndex += 1;
+      }
+      this.setCursor(insertIndex - 1, parts[parts.length - 1].length);
+      this.invalidateLayout();
+    }
+
+    insertLineBreak(options = {}) {
+      const { indent } = options;
+      this.saveHistory();
+      if (this.state.selection) {
+        this.collapseSelectionWithoutHistory();
+      }
+      const cursor = this.state.cursor;
+      const line = this.state.lines[cursor.lineIndex];
+      const tail = line.text.slice(cursor.charIndex);
+      const head = line.text.slice(0, cursor.charIndex);
+      line.text = head;
+      const newIndent =
+        typeof indent === "number" ? indent : line.indent;
+      const newLine = this.createLine(tail, newIndent, false);
+      this.state.lines.splice(cursor.lineIndex + 1, 0, newLine);
+      this.setCursor(cursor.lineIndex + 1, 0);
+      this.invalidateLayout();
+    }
+
+    insertBracketPair() {
+      this.saveHistory();
+      if (this.state.selection) {
+        const selection = this.getNormalizedSelection();
+        const extracted = this.getSelectedText();
+        this.collapseSelectionWithoutHistory();
+        const line = this.state.lines[this.state.cursor.lineIndex];
+        const cursor = this.state.cursor;
+        const head = line.text.slice(0, cursor.charIndex);
+        const tail = line.text.slice(cursor.charIndex);
+        line.text = `${head}[${extracted}]${tail}`;
+        this.setCursor(cursor.lineIndex, cursor.charIndex + extracted.length + 2);
       } else {
-        this.selectionStart = this.selectionEnd = this.cursor;
+        const cursor = this.state.cursor;
+        const line = this.state.lines[cursor.lineIndex];
+        const head = line.text.slice(0, cursor.charIndex);
+        const tail = line.text.slice(cursor.charIndex);
+        line.text = `${head}[]${tail}`;
+        this.setCursor(cursor.lineIndex, cursor.charIndex + 1);
       }
     }
 
-    moveCursorLine(direction) {
-      const { row, col } = this.getPosFromIndex(this.cursor);
-      if (this.preferredCursorX < 0) {
-        this.preferredCursorX = this.measureText(this.lines[row].substring(0, col));
+    handleBackspace() {
+      if (this.deleteSelection()) return;
+      const cursor = this.state.cursor;
+      const line = this.state.lines[cursor.lineIndex];
+      if (cursor.charIndex > 0) {
+        this.saveHistory();
+        line.text =
+          line.text.slice(0, cursor.charIndex - 1) +
+          line.text.slice(cursor.charIndex);
+        this.setCursor(cursor.lineIndex, cursor.charIndex - 1);
+        return;
       }
-      const newRow = Math.max(0, Math.min(this.lines.length - 1, row + direction));
-      if (newRow === row) return;
-      const newCol = this.getColFromX(this.lines[newRow], this.preferredCursorX);
-      this.setCursor(this.getIndexFromPos(newRow, newCol), false);
+      if (line.indent > 0) {
+        this.changeIndent(-1);
+        return;
+      }
+      if (cursor.lineIndex === 0) return;
+      this.saveHistory();
+      const prevLineIndex = cursor.lineIndex - 1;
+      const prevLine = this.state.lines[prevLineIndex];
+      const prevLength = prevLine.text.length;
+      prevLine.text += line.text;
+      const blockLength = this.getDescendantEnd(cursor.lineIndex) - cursor.lineIndex;
+      this.state.lines.splice(cursor.lineIndex, blockLength);
+      this.setCursor(prevLineIndex, prevLength);
+      this.invalidateLayout();
     }
 
-    handleHomeEndKeys(e) {
-      const { row } = this.getPosFromIndex(this.cursor);
-      const newCol = e.key === "Home" ? 0 : this.lines[row].length;
-      const newCursorPos = this.getIndexFromPos(row, newCol);
-      if (e.shiftKey) {
-        this.selectionEnd = newCursorPos;
+    handleDelete() {
+      if (this.deleteSelection()) return;
+      const cursor = this.state.cursor;
+      const line = this.state.lines[cursor.lineIndex];
+      if (cursor.charIndex < line.text.length) {
+        this.saveHistory();
+        line.text =
+          line.text.slice(0, cursor.charIndex) +
+          line.text.slice(cursor.charIndex + 1);
+        return;
+      }
+      if (cursor.lineIndex >= this.state.lines.length - 1) return;
+      this.saveHistory();
+      const nextLineIndex = cursor.lineIndex + 1;
+      const nextLine = this.state.lines[nextLineIndex];
+      if (nextLine.indent > line.indent) {
+        nextLine.indent = line.indent;
+      }
+      line.text += nextLine.text;
+      const blockLength = this.getDescendantEnd(nextLineIndex) - nextLineIndex;
+      this.state.lines.splice(nextLineIndex, blockLength);
+      this.invalidateLayout();
+    }
+
+    deleteSelection() {
+      if (!this.state.selection) return false;
+      this.saveHistory();
+      this.collapseSelectionWithoutHistory();
+      return true;
+    }
+
+    collapseSelectionWithoutHistory() {
+      const range = this.getNormalizedSelection();
+      if (!range) return null;
+      const { start, end } = range;
+      const startLine = this.state.lines[start.lineIndex];
+      const endLine = this.state.lines[end.lineIndex];
+      if (start.lineIndex === end.lineIndex) {
+        startLine.text =
+          startLine.text.slice(0, start.charIndex) +
+          startLine.text.slice(end.charIndex);
       } else {
-        this.selectionStart = this.selectionEnd = newCursorPos;
+        startLine.text =
+          startLine.text.slice(0, start.charIndex) +
+          endLine.text.slice(end.charIndex);
+        const removeCount = end.lineIndex - start.lineIndex;
+        this.state.lines.splice(start.lineIndex + 1, removeCount);
       }
-      this.setCursor(newCursorPos);
+      this.setCursor(start.lineIndex, start.charIndex);
+      this.state.selection = null;
+      this.selectionAnchor = null;
+      this.invalidateLayout();
+      return start;
     }
 
-    handlePageKeys(e) {
-      const direction = e.key === "PageUp" ? -1 : 1;
-      const { row, col } = this.getPosFromIndex(this.cursor);
-      if (this.preferredCursorX < 0) {
-        this.preferredCursorX = this.measureText(this.lines[row].substring(0, col));
+    selectAll() {
+      if (this.state.lines.length === 0) return;
+      const lastLineIndex = this.state.lines.length - 1;
+      const lastChar = this.state.lines[lastLineIndex].text.length;
+      this.state.selection = {
+        start: { lineIndex: 0, charIndex: 0 },
+        end: { lineIndex: lastLineIndex, charIndex: lastChar },
+      };
+      this.setCursor(lastLineIndex, lastChar, { resetSelection: false });
+    }
+    moveCursorHorizontal(direction, extendSelection = false) {
+      if (this.state.selection && !extendSelection) {
+        const target =
+          direction < 0
+            ? this.getNormalizedSelection().start
+            : this.getNormalizedSelection().end;
+        this.setCursor(target.lineIndex, target.charIndex);
+        this.state.selection = null;
+        return;
       }
-      const newRow = Math.max(
-        0,
-        Math.min(this.lines.length - 1, row + direction * this.visibleLines)
+
+      const cursor = this.state.cursor;
+      const line = this.state.lines[cursor.lineIndex];
+      let newLineIndex = cursor.lineIndex;
+      let newCharIndex = cursor.charIndex + direction;
+
+      if (newCharIndex < 0) {
+        const prevVisible = this.getPreviousVisibleLine(cursor.lineIndex);
+        if (prevVisible === null) {
+          newCharIndex = 0;
+        } else {
+          newLineIndex = prevVisible;
+          newCharIndex = this.state.lines[prevVisible].text.length;
+        }
+      } else if (newCharIndex > line.text.length) {
+        const nextVisible = this.getNextVisibleLine(cursor.lineIndex);
+        if (nextVisible === null) {
+          newCharIndex = line.text.length;
+        } else {
+          newLineIndex = nextVisible;
+          newCharIndex = 0;
+        }
+      }
+
+      if (extendSelection) {
+        this.ensureSelectionAnchor();
+        this.setCursor(newLineIndex, newCharIndex, {
+          resetSelection: false,
+        });
+        this.state.selection = {
+          start: { ...this.selectionAnchor },
+          end: { ...this.state.cursor },
+        };
+      } else {
+        this.setCursor(newLineIndex, newCharIndex);
+      }
+    }
+
+    moveCursorVertical(visibleDelta, extendSelection = false) {
+      const visibleLines = this.getVisibleLines();
+      if (visibleLines.length === 0) return;
+      const currentVisibleIndex = this.getVisibleIndex(
+        this.state.cursor.lineIndex
       );
-      const newCol = this.getColFromX(this.lines[newRow], this.preferredCursorX);
-      const newCursorPos = this.getIndexFromPos(newRow, newCol);
-      if (e.shiftKey) {
-        this.selectionEnd = newCursorPos;
-      } else {
-        this.selectionStart = this.selectionEnd = newCursorPos;
+      if (currentVisibleIndex === -1) return;
+
+      if (this.preferredCursorX < 0) {
+        const line = this.getCurrentLine();
+        this.preferredCursorX = this.measureText(
+          line.text.slice(0, this.state.cursor.charIndex)
+        );
       }
-      this.setCursor(newCursorPos, false);
+
+      const targetVisibleIndex = Math.max(
+        0,
+        Math.min(visibleLines.length - 1, currentVisibleIndex + visibleDelta)
+      );
+      const targetLineIndex = visibleLines[targetVisibleIndex];
+      const targetLine = this.state.lines[targetLineIndex];
+      const targetCharIndex = this.getCharIndexForX(
+        targetLine.text,
+        this.preferredCursorX
+      );
+
+      if (extendSelection) {
+        this.ensureSelectionAnchor();
+        this.setCursor(targetLineIndex, targetCharIndex, {
+          resetSelection: false,
+        });
+        this.state.selection = {
+          start: { ...this.selectionAnchor },
+          end: { ...this.state.cursor },
+        };
+      } else {
+        this.setCursor(targetLineIndex, targetCharIndex);
+      }
+    }
+
+    moveCursorToLineEdge(direction, extendSelection) {
+      const targetChar =
+        direction === "start"
+          ? 0
+          : this.getCurrentLine().text.length;
+      if (extendSelection) {
+        this.ensureSelectionAnchor();
+        this.setCursor(this.state.cursor.lineIndex, targetChar, {
+          resetSelection: false,
+        });
+        this.state.selection = {
+          start: { ...this.selectionAnchor },
+          end: { ...this.state.cursor },
+        };
+      } else {
+        this.setCursor(this.state.cursor.lineIndex, targetChar);
+      }
+    }
+
+    moveCursorToDocumentEdge(direction, extendSelection) {
+      const lineIndex =
+        direction === "start" ? 0 : this.state.lines.length - 1;
+      const charIndex =
+        direction === "start"
+          ? 0
+          : this.state.lines[lineIndex].text.length;
+      if (extendSelection) {
+        this.ensureSelectionAnchor();
+        this.setCursor(lineIndex, charIndex, { resetSelection: false });
+        this.state.selection = {
+          start: { ...this.selectionAnchor },
+          end: { ...this.state.cursor },
+        };
+      } else {
+        this.setCursor(lineIndex, charIndex);
+      }
+    }
+
+    moveCursorByWord(direction, extendSelection) {
+      const line = this.getCurrentLine();
+      const cursor = this.state.cursor;
+      let lineIndex = cursor.lineIndex;
+      let charIndex = cursor.charIndex;
+
+      if (direction < 0) {
+        if (charIndex === 0) {
+          const prev = this.getPreviousVisibleLine(lineIndex);
+          if (prev === null) return;
+          lineIndex = prev;
+          charIndex = this.state.lines[prev].text.length;
+        }
+        charIndex = this.findWordBoundary(
+          this.state.lines[lineIndex].text,
+          charIndex,
+          -1
+        );
+      } else {
+        if (charIndex === line.text.length) {
+          const next = this.getNextVisibleLine(lineIndex);
+          if (next === null) return;
+          lineIndex = next;
+          charIndex = 0;
+        }
+        charIndex = this.findWordBoundary(
+          this.state.lines[lineIndex].text,
+          charIndex,
+          1
+        );
+      }
+
+      if (extendSelection) {
+        this.ensureSelectionAnchor();
+        this.setCursor(lineIndex, charIndex, { resetSelection: false });
+        this.state.selection = {
+          start: { ...this.selectionAnchor },
+          end: { ...this.state.cursor },
+        };
+      } else {
+        this.setCursor(lineIndex, charIndex);
+      }
+    }
+
+    ensureSelectionAnchor() {
+      if (!this.selectionAnchor) {
+        if (this.state.selection) {
+          this.selectionAnchor = { ...this.getNormalizedSelection().start };
+        } else {
+          this.selectionAnchor = { ...this.state.cursor };
+        }
+      }
+    }
+
+    findWordBoundary(text, index, direction) {
+      const isWord = (ch) => /[\w_]/.test(ch);
+      if (direction < 0) {
+        let i = Math.max(0, index - 1);
+        const targetType = isWord(text[i]);
+        while (i > 0 && isWord(text[i - 1]) === targetType) {
+          i -= 1;
+        }
+        return i;
+      }
+      let i = Math.min(text.length, index);
+      const targetType = isWord(text[i]) || isWord(text[i - 1]);
+      while (i < text.length && isWord(text[i]) === targetType) {
+        i += 1;
+      }
+      return i;
+    }
+
+    changeIndent(delta, options = {}) {
+      const { applyToSelection = false } = options;
+      const range = applyToSelection
+        ? this.getSelectionLineRange()
+        : { start: this.state.cursor.lineIndex, end: this.state.cursor.lineIndex };
+      if (!range) return;
+      this.saveHistory();
+      let index = range.start;
+      while (index <= range.end && index < this.state.lines.length) {
+        const blockEnd = this.getDescendantEnd(index);
+        for (let i = index; i < blockEnd; i += 1) {
+          const line = this.state.lines[i];
+          line.indent = Math.max(0, line.indent + delta);
+        }
+        index = blockEnd;
+      }
+      this.invalidateLayout();
+    }
+
+    toggleCollapse(lineIndex) {
+      const line = this.state.lines[lineIndex];
+      if (!this.hasChildren(lineIndex)) return;
+      this.saveHistory();
+      line.collapsed = !line.collapsed;
+      this.invalidateLayout();
+      if (line.collapsed && !this.isVisible(this.state.cursor.lineIndex)) {
+        this.setCursor(
+          lineIndex,
+          Math.min(this.state.cursor.charIndex, line.text.length)
+        );
+      }
+    }
+
+    moveBlock(direction) {
+      const start = this.state.cursor.lineIndex;
+      const end = this.getDescendantEnd(start);
+      const blockLength = end - start;
+      const baseIndent = this.state.lines[start].indent;
+
+      if (direction < 0) {
+        let prev = start - 1;
+        while (prev >= 0 && this.state.lines[prev].indent > baseIndent) {
+          prev -= 1;
+        }
+        if (prev < 0 || this.state.lines[prev].indent !== baseIndent) return;
+        const block = this.state.lines.splice(start, blockLength);
+        const insertIndex = prev;
+        this.state.lines.splice(insertIndex, 0, ...block);
+        this.setCursor(insertIndex, this.state.cursor.charIndex);
+      } else {
+        if (end >= this.state.lines.length) return;
+        if (this.state.lines[end].indent !== baseIndent) return;
+        const nextBlockEnd = this.getDescendantEnd(end);
+        const block = this.state.lines.splice(start, blockLength);
+        const insertIndex = nextBlockEnd - blockLength;
+        this.state.lines.splice(insertIndex, 0, ...block);
+        this.setCursor(insertIndex, this.state.cursor.charIndex);
+      }
+      this.invalidateLayout();
+    }
+    setCursor(lineIndex, charIndex, options = {}) {
+      const { resetSelection = true, scrollIntoView = true } = options;
+      lineIndex = Math.max(0, Math.min(this.state.lines.length - 1, lineIndex));
+      const line = this.state.lines[lineIndex];
+      charIndex = Math.max(0, Math.min(line.text.length, charIndex));
+      this.state.cursor = { lineIndex, charIndex };
+      if (resetSelection) {
+        this.state.selection = null;
+        this.selectionAnchor = null;
+      }
+      if (scrollIntoView) {
+        this.scrollToCursor();
+      }
+      this.resetCursorBlink();
+      this.preferredCursorX = -1;
+    }
+
+    getCursorCoords() {
+      const lineIndex = this.state.cursor.lineIndex;
+      const visibleIndex = this.getVisibleIndex(lineIndex);
+      if (visibleIndex === -1) {
+        return { x: 0, y: 0, line: null };
+      }
+      const line = this.state.lines[lineIndex];
+      const textBefore = line.text.slice(0, this.state.cursor.charIndex);
+      const indentX =
+        this.config.padding + line.indent * this.state.view.indentWidth;
+      const x =
+        indentX + this.measureText(textBefore);
+      const y =
+        this.config.padding + visibleIndex * this.state.view.lineHeight - this.state.view.scrollTop;
+      return { x, y, line };
+    }
+
+    updateTextareaPosition() {
+      if (!this.isFocused) return;
+      const { x, y } = this.getCursorCoords();
+      this.textarea.style.left = `${x}px`;
+      this.textarea.style.top = `${y}px`;
+    }
+
+    ensureCursorVisibleWhileDragging(mouseY) {
+      const threshold = 20;
+      if (mouseY < threshold) {
+        this.state.view.scrollTop = Math.max(
+          0,
+          this.state.view.scrollTop - this.state.view.lineHeight
+        );
+      } else if (mouseY > this.canvas.height - threshold) {
+        this.state.view.scrollTop = Math.min(
+          this.getMaxScroll(),
+          this.state.view.scrollTop + this.state.view.lineHeight
+        );
+      }
+    }
+
+    getCurrentLine() {
+      return this.state.lines[this.state.cursor.lineIndex];
+    }
+
+    getSelectionLineRange() {
+      const selection = this.getNormalizedSelection();
+      if (!selection) return null;
+      return {
+        start: selection.start.lineIndex,
+        end: selection.end.lineIndex,
+      };
+    }
+
+    getNormalizedSelection() {
+      if (!this.state.selection) return null;
+      const { start, end } = this.state.selection;
+      const comparison = this.comparePoints(start, end);
+      if (comparison <= 0) {
+        return {
+          start: { ...start },
+          end: { ...end },
+        };
+      }
+      return {
+        start: { ...end },
+        end: { ...start },
+      };
+    }
+
+    comparePoints(a, b) {
+      if (a.lineIndex !== b.lineIndex) {
+        return a.lineIndex - b.lineIndex;
+      }
+      return a.charIndex - b.charIndex;
+    }
+
+    hasSelection() {
+      const selection = this.state.selection;
+      if (!selection) return false;
+      return this.comparePoints(selection.start, selection.end) !== 0;
+    }
+
+    hitTest(offsetX, offsetY) {
+      const y = offsetY + this.state.view.scrollTop;
+      const lineHeight = this.state.view.lineHeight;
+      const visibleLines = this.getVisibleLines();
+      const index = Math.floor(
+        (y - this.config.padding) / lineHeight
+      );
+      if (index < 0 || index >= visibleLines.length) {
+        return { lineIndex: null, charIndex: null, clickedIcon: false };
+      }
+      const lineIndex = visibleLines[index];
+      const line = this.state.lines[lineIndex];
+      const indentWidth = this.state.view.indentWidth;
+      const indentX =
+        this.config.padding + line.indent * indentWidth;
+      const iconAreaEnd = indentX - indentWidth * 0.2;
+      if (offsetX < iconAreaEnd && this.hasChildren(lineIndex)) {
+        return { lineIndex, charIndex: 0, clickedIcon: true };
+      }
+      const relativeX = Math.max(0, offsetX - indentX);
+      const charIndex = this.getCharIndexForX(line.text, relativeX);
+      return { lineIndex, charIndex, clickedIcon: false };
+    }
+
+    getCharIndexForX(text, targetX) {
+      let minDelta = Infinity;
+      let bestIndex = 0;
+      for (let i = 0; i <= text.length; i += 1) {
+        const width = this.measureText(text.slice(0, i));
+        const delta = Math.abs(targetX - width);
+        if (delta < minDelta) {
+          minDelta = delta;
+          bestIndex = i;
+        }
+      }
+      return bestIndex;
+    }
+
+    getVisibleLines() {
+      if (this.visibleLinesCache) return this.visibleLinesCache;
+      const result = [];
+      this.state.lines.forEach((line, index) => {
+        if (this.isVisible(index)) {
+          result.push(index);
+        }
+      });
+      this.visibleLinesCache = result;
+      return result;
+    }
+
+    invalidateLayout() {
+      this.visibleLinesCache = null;
+    }
+
+    isVisible(lineIndex) {
+      let current = lineIndex;
+      while (current > 0) {
+        const parent = this.getParent(current);
+        if (parent === null) break;
+        if (this.state.lines[parent].collapsed) return false;
+        current = parent;
+      }
+      return true;
+    }
+
+    getParent(lineIndex) {
+      const indent = this.state.lines[lineIndex].indent;
+      for (let i = lineIndex - 1; i >= 0; i -= 1) {
+        if (this.state.lines[i].indent < indent) {
+          return i;
+        }
+      }
+      return null;
+    }
+
+    hasChildren(lineIndex) {
+      const next = lineIndex + 1;
+      if (next >= this.state.lines.length) return false;
+      return this.state.lines[next].indent > this.state.lines[lineIndex].indent;
+    }
+
+    getDescendantEnd(lineIndex) {
+      const baseIndent = this.state.lines[lineIndex].indent;
+      let index = lineIndex + 1;
+      while (
+        index < this.state.lines.length &&
+        this.state.lines[index].indent > baseIndent
+      ) {
+        index += 1;
+      }
+      return index;
+    }
+
+    getPreviousVisibleLine(lineIndex) {
+      const visibleIndex = this.getVisibleIndex(lineIndex);
+      if (visibleIndex <= 0) return null;
+      const visibleLines = this.getVisibleLines();
+      return visibleLines[visibleIndex - 1];
+    }
+
+    getNextVisibleLine(lineIndex) {
+      const visibleLines = this.getVisibleLines();
+      const visibleIndex = this.getVisibleIndex(lineIndex);
+      if (visibleIndex === -1 || visibleIndex >= visibleLines.length - 1) {
+        return null;
+      }
+      return visibleLines[visibleIndex + 1];
+    }
+
+    getVisibleIndex(lineIndex) {
+      const visibleLines = this.getVisibleLines();
+      return visibleLines.indexOf(lineIndex);
+    }
+
+    getMaxScroll() {
+      const totalHeight =
+        this.getVisibleLines().length * this.state.view.lineHeight +
+        this.config.padding * 2;
+      return Math.max(0, totalHeight - this.canvas.height);
     }
 
     scrollToCursor() {
-      const { y: cursorY } = this.getCursorCoords(this.cursor);
-      const visibleTop = this.scrollY;
-      const visibleBottom =
-        this.scrollY + this.canvas.height - this.config.padding * 2;
-      if (cursorY < visibleTop) {
-        this.scrollY = cursorY - this.config.padding;
-      } else if (cursorY + this.config.lineHeight > visibleBottom) {
-        this.scrollY =
-          cursorY +
-          this.config.lineHeight -
-          (this.canvas.height - this.config.padding * 2) +
-          this.config.padding;
+      const visibleIndex = this.getVisibleIndex(this.state.cursor.lineIndex);
+      if (visibleIndex === -1) return;
+      const lineTop =
+        this.config.padding + visibleIndex * this.state.view.lineHeight;
+      const lineBottom = lineTop + this.state.view.lineHeight;
+      const viewTop = this.state.view.scrollTop;
+      const viewBottom = viewTop + this.canvas.height;
+      if (lineTop < viewTop + this.config.padding) {
+        this.state.view.scrollTop = Math.max(
+          0,
+          lineTop - this.config.padding
+        );
+      } else if (lineBottom > viewBottom - this.config.padding) {
+        this.state.view.scrollTop = Math.min(
+          this.getMaxScroll(),
+          lineBottom - this.canvas.height + this.config.padding
+        );
       }
     }
 
-    // =========================================================================
-    // 履歴 (Undo/Redo)
-    // =========================================================================
-    saveState() {
-      if (this.isUndoingOrRedoing) return;
-      const state = {
-        text: this.text,
-        cursor: this.cursor,
-        selectionStart: this.selectionStart,
-        selectionEnd: this.selectionEnd,
+    getSelectedText() {
+      const range = this.getNormalizedSelection();
+      if (!range) return "";
+      const { start, end } = range;
+      if (start.lineIndex === end.lineIndex) {
+        const line = this.state.lines[start.lineIndex];
+        return line.text.slice(start.charIndex, end.charIndex);
+      }
+      const parts = [];
+      const firstLine = this.state.lines[start.lineIndex];
+      parts.push(firstLine.text.slice(start.charIndex));
+      for (let i = start.lineIndex + 1; i < end.lineIndex; i += 1) {
+        parts.push(this.state.lines[i].text);
+      }
+      const lastLine = this.state.lines[end.lineIndex];
+      parts.push(lastLine.text.slice(0, end.charIndex));
+      return parts.join("\n");
+    }
+    saveHistory() {
+      const snapshot = this.createStateSnapshot();
+      this.state.history.undoStack.push(snapshot);
+      if (this.state.history.undoStack.length > this.config.historyLimit) {
+        this.state.history.undoStack.shift();
+      }
+      this.state.history.redoStack = [];
+    }
+
+    createStateSnapshot() {
+      return {
+        lines: this.state.lines.map((line) => ({ ...line })),
+        cursor: { ...this.state.cursor },
+        selection: this.state.selection
+          ? {
+            start: { ...this.state.selection.start },
+            end: { ...this.state.selection.end },
+          }
+          : null,
+        scrollTop: this.state.view.scrollTop,
       };
-      this.undoStack.push(state);
-      if (this.undoStack.length > this.config.historyLimit) {
-        this.undoStack.shift();
-      }
-      this.redoStack = [];
     }
 
-    applyState(state) {
-      this.text = state.text;
-      this.selectionStart = state.selectionStart;
-      this.selectionEnd = state.selectionEnd;
-      this.updateLines();
-      this.setCursor(state.cursor);
+    applySnapshot(snapshot) {
+      this.state.lines = snapshot.lines.map((line) => ({ ...line }));
+      this.state.cursor = { ...snapshot.cursor };
+      this.state.selection = snapshot.selection
+        ? {
+          start: { ...snapshot.selection.start },
+          end: { ...snapshot.selection.end },
+        }
+        : null;
+      this.state.view.scrollTop = snapshot.scrollTop;
+      this.invalidateLayout();
+      this.resetCursorBlink();
     }
 
     undo() {
-      if (this.undoStack.length === 0) return;
-      this.isUndoingOrRedoing = true;
-      const currentState = {
-        text: this.text,
-        cursor: this.cursor,
-        selectionStart: this.selectionStart,
-        selectionEnd: this.selectionEnd,
-      };
-      this.redoStack.push(currentState);
-      this.applyState(this.undoStack.pop());
-      this.isUndoingOrRedoing = false;
+      if (this.state.history.undoStack.length === 0) return;
+      const current = this.createStateSnapshot();
+      const snapshot = this.state.history.undoStack.pop();
+      this.state.history.redoStack.push(current);
+      this.applySnapshot(snapshot);
     }
 
     redo() {
-      if (this.redoStack.length === 0) return;
-      this.isUndoingOrRedoing = true;
-      const currentState = {
-        text: this.text,
-        cursor: this.cursor,
-        selectionStart: this.selectionStart,
-        selectionEnd: this.selectionEnd,
-      };
-      this.undoStack.push(currentState);
-      this.applyState(this.redoStack.pop());
-      this.isUndoingOrRedoing = false;
+      if (this.state.history.redoStack.length === 0) return;
+      const current = this.createStateSnapshot();
+      const snapshot = this.state.history.redoStack.pop();
+      this.state.history.undoStack.push(current);
+      this.applySnapshot(snapshot);
     }
 
-    // =========================================================================
-    // ユーティリティ
-    // =========================================================================
+    measureText(text) {
+      let width = 0;
+      for (const char of text) {
+        width += this.getCharWidth(char);
+      }
+      return width;
+    }
+
     getCharWidth(char) {
       if (this.charWidthCache.has(char)) {
         return this.charWidthCache.get(char);
@@ -615,97 +1341,6 @@ document.addEventListener("DOMContentLoaded", () => {
       this.charWidthCache.set(char, width);
       return width;
     }
-
-    measureText(text) {
-      let totalWidth = 0;
-      for (const char of text) totalWidth += this.getCharWidth(char);
-      return totalWidth;
-    }
-
-    drawTextWithKerning(text, startX, y) {
-      let currentX = startX;
-      for (const char of text) {
-        this.ctx.fillText(char, currentX, y);
-        currentX += this.getCharWidth(char);
-      }
-    }
-
-    hasSelection() {
-      return this.selectionStart !== this.selectionEnd;
-    }
-
-    getSelectionRange() {
-      return {
-        start: Math.min(this.selectionStart, this.selectionEnd),
-        end: Math.max(this.selectionStart, this.selectionEnd),
-      };
-    }
-
-    getPosFromIndex(index) {
-      let count = 0;
-      for (let i = 0; i < this.lines.length; i++) {
-        const lineLength = this.lines[i].length + 1;
-        if (count + lineLength > index) {
-          return { row: i, col: index - count };
-        }
-        count += lineLength;
-      }
-      return {
-        row: this.lines.length - 1,
-        col: this.lines[this.lines.length - 1].length,
-      };
-    }
-
-    getIndexFromPos(row, col) {
-      let index = 0;
-      for (let i = 0; i < row; i++) {
-        index += this.lines[i].length + 1;
-      }
-      return index + col;
-    }
-
-    getCursorCoords(index) {
-      const { row, col } = this.getPosFromIndex(index);
-      const textBefore = this.lines[row].substring(0, col);
-      const x = this.config.padding + this.measureText(textBefore);
-      const y = this.config.padding + row * this.config.lineHeight;
-      return { x, y };
-    }
-
-    getCursorIndexFromCoords(x, y) {
-      const row = Math.max(
-        0,
-        Math.min(
-          this.lines.length - 1,
-          Math.floor(
-            (y + this.scrollY - this.config.padding) / this.config.lineHeight
-          )
-        )
-      );
-      const col = this.getColFromX(this.lines[row], x - this.config.padding);
-      return this.getIndexFromPos(row, col);
-    }
-
-    getColFromX(line, targetX) {
-      let minDelta = Infinity;
-      let col = 0;
-      for (let i = 0; i <= line.length; i++) {
-        const w = this.measureText(line.substring(0, i));
-        const delta = Math.abs(targetX - w);
-        if (delta < minDelta) {
-          minDelta = delta;
-          col = i;
-        }
-      }
-      return col;
-    }
-
-    updateTextareaPosition() {
-      if (!this.isFocused) return;
-      const coords = this.getCursorCoords(this.cursor);
-      this.textarea.style.left = `${coords.x}px`;
-      this.textarea.style.top = `${coords.y - this.scrollY}px`;
-    }
   }
 
   new CanvasEditor(
@@ -713,3 +1348,5 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("hidden-input")
   );
 });
+
+
