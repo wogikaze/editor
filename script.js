@@ -37,6 +37,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
       this.textWidthCache = new Map();
       this.visibleLinesCache = null;
+      this.lineLayouts = new Map();
+      this.ignoreNextClick = false;
+      this.draggedDuringClick = false;
 
       this.init();
     }
@@ -95,6 +98,7 @@ document.addEventListener("DOMContentLoaded", () => {
       this.canvas.addEventListener("mousedown", this.onMouseDown.bind(this));
       this.canvas.addEventListener("mousemove", this.onMouseMove.bind(this));
       window.addEventListener("mouseup", this.onMouseUp.bind(this));
+      this.canvas.addEventListener("click", this.onClick.bind(this));
       this.canvas.addEventListener("wheel", this.onWheel.bind(this), {
         passive: false,
       });
@@ -138,6 +142,8 @@ document.addEventListener("DOMContentLoaded", () => {
       this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
       this.ctx.save();
       this.ctx.translate(0, -this.state.view.scrollTop);
+
+      this.lineLayouts.clear();
 
       const visibleLines = this.getVisibleLines();
       const lineHeight = this.state.view.lineHeight;
@@ -240,12 +246,29 @@ document.addEventListener("DOMContentLoaded", () => {
       const baseline = y + this.state.view.lineHeight / 2 + 1;
       const segments = this.getRenderedSegments(line, lineIndex);
       let cursorX = indentX;
+      const clickableSegments = [];
 
       segments.forEach((segment) => {
+        const startX = cursorX;
+        const segmentWidth = this.measureText(segment.displayText);
         this.ctx.fillStyle = this.getSegmentColor(segment);
-        this.ctx.fillText(segment.displayText, cursorX, baseline);
-        cursorX += this.measureText(segment.displayText);
+        this.ctx.fillText(segment.displayText, startX, baseline);
+        if (segment.target && (segment.isLink || segment.isRelativeLink)) {
+          clickableSegments.push({
+            startX,
+            endX: startX + segmentWidth,
+            target: segment.target,
+            type: segment.isLink ? "absolute" : "relative",
+          });
+        }
+        cursorX += segmentWidth;
       });
+
+      if (clickableSegments.length > 0) {
+        this.lineLayouts.set(lineIndex, clickableSegments);
+      } else {
+        this.lineLayouts.delete(lineIndex);
+      }
     }
     renderCursor() {
       if (!this.isFocused || this.isComposing) return;
@@ -311,7 +334,12 @@ document.addEventListener("DOMContentLoaded", () => {
           if (tokenType === "link") {
             const match = text.slice(i).match(/^https:\/\/\S+/);
             const linkText = match ? match[0] : "https://";
-            segments.push({ displayText: linkText, isLink: true, isQuote });
+            segments.push({
+              displayText: linkText,
+              isLink: true,
+              isQuote,
+              target: linkText,
+            });
             i += linkText.length;
           } else if (tokenType === "relative") {
             const closingIndex = text.indexOf("]", i + 1);
@@ -320,11 +348,15 @@ document.addEventListener("DOMContentLoaded", () => {
               break;
             }
             const label = text.slice(i + 1, closingIndex);
-            if (isActiveLine) {
-              segments.push({ displayText: `[${label}]`, isQuote });
-            } else {
-              segments.push({ displayText: label, isRelativeLink: true, isQuote });
+            const segment = {
+              displayText: isActiveLine ? `[${label}]` : label,
+              isQuote,
+              target: label,
+            };
+            if (!isActiveLine) {
+              segment.isRelativeLink = true;
             }
+            segments.push(segment);
             i = closingIndex + 1;
           }
         }
@@ -365,12 +397,15 @@ document.addEventListener("DOMContentLoaded", () => {
     onMouseDown(e) {
       e.preventDefault();
       this.focus();
+      this.draggedDuringClick = false;
+      this.ignoreNextClick = false;
       const { lineIndex, charIndex, clickedIcon } = this.hitTest(
         e.offsetX,
         e.offsetY
       );
       if (lineIndex === null) return;
       if (clickedIcon) {
+        this.ignoreNextClick = true;
         this.toggleCollapse(lineIndex);
         return;
       }
@@ -382,6 +417,7 @@ document.addEventListener("DOMContentLoaded", () => {
     onMouseMove(e) {
       if (!this.isDragging) return;
       e.preventDefault();
+      this.draggedDuringClick = true;
       const hit = this.hitTest(e.offsetX, e.offsetY);
       if (hit.lineIndex === null) return;
       this.setCursor(hit.lineIndex, hit.charIndex, {
@@ -400,6 +436,27 @@ document.addEventListener("DOMContentLoaded", () => {
     onMouseUp() {
       this.isDragging = false;
       this.preferredCursorX = -1;
+    }
+
+    onClick(e) {
+      if (this.ignoreNextClick) {
+        this.ignoreNextClick = false;
+        this.draggedDuringClick = false;
+        return;
+      }
+      if (this.draggedDuringClick) {
+        this.draggedDuringClick = false;
+        return;
+      }
+      const hit = this.hitTest(e.offsetX, e.offsetY);
+      if (hit.lineIndex === null) {
+        this.draggedDuringClick = false;
+        return;
+      }
+      if (this.openLinkAt(hit.lineIndex, e.offsetX)) {
+        e.preventDefault();
+      }
+      this.draggedDuringClick = false;
     }
 
     onWheel(e) {
@@ -502,6 +559,15 @@ document.addEventListener("DOMContentLoaded", () => {
           this.handleDelete();
           break;
         case " ":
+          if (this.state.cursor.charIndex === 0) {
+            e.preventDefault();
+            this.changeIndent(1, {
+              applyToSelection: this.hasSelection(),
+              includeChildren: false,
+            });
+          }
+          break;
+        case "　":
           if (this.state.cursor.charIndex === 0) {
             e.preventDefault();
             this.changeIndent(1, {
@@ -1029,6 +1095,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const end = this.getDescendantEnd(start);
       const blockLength = end - start;
       const baseIndent = this.state.lines[start].indent;
+      if (blockLength <= 0) return;
 
       if (direction < 0) {
         let prev = start - 1;
@@ -1036,6 +1103,7 @@ document.addEventListener("DOMContentLoaded", () => {
           prev -= 1;
         }
         if (prev < 0 || this.state.lines[prev].indent !== baseIndent) return;
+        this.saveHistory();
         const block = this.state.lines.splice(start, blockLength);
         const insertIndex = prev;
         this.state.lines.splice(insertIndex, 0, ...block);
@@ -1044,6 +1112,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (end >= this.state.lines.length) return;
         if (this.state.lines[end].indent !== baseIndent) return;
         const nextBlockEnd = this.getDescendantEnd(end);
+        this.saveHistory();
         const block = this.state.lines.splice(start, blockLength);
         const insertIndex = nextBlockEnd - blockLength;
         this.state.lines.splice(insertIndex, 0, ...block);
@@ -1185,6 +1254,30 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       }
       return bestIndex;
+    }
+
+    openLinkAt(lineIndex, offsetX) {
+      const segments = this.lineLayouts.get(lineIndex);
+      if (!segments || segments.length === 0) return false;
+      const targetSegment = segments.find(
+        (segment) => offsetX >= segment.startX && offsetX <= segment.endX
+      );
+      if (!targetSegment || !targetSegment.target) return false;
+      const target = targetSegment.target.trim();
+      if (!target) return false;
+
+      if (targetSegment.type === "absolute") {
+        window.open(target, "_blank", "noopener");
+        return true;
+      }
+
+      try {
+        const resolved = new URL(target, window.location.href).toString();
+        window.open(resolved, "_blank", "noopener");
+        return true;
+      } catch (error) {
+        return false;
+      }
     }
 
     getVisibleLines() {
