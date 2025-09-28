@@ -421,9 +421,20 @@ document.addEventListener("DOMContentLoaded", () => {
       if (this.isComposing) return;
       const ctrl = e.ctrlKey || e.metaKey;
       const shift = e.shiftKey;
+      const alt = e.altKey;
       const key = e.key;
 
       if (ctrl && this.handleCtrlShortcuts(e, key, shift)) {
+        return;
+      }
+
+      if (alt && !ctrl && (key === "ArrowLeft" || key === "ArrowRight")) {
+        e.preventDefault();
+        const delta = key === "ArrowLeft" ? -1 : 1;
+        this.changeIndent(delta, {
+          applyToSelection: this.hasSelection(),
+          includeChildren: true,
+        });
         return;
       }
 
@@ -471,9 +482,15 @@ document.addEventListener("DOMContentLoaded", () => {
         case "Tab":
           e.preventDefault();
           if (shift) {
-            this.changeIndent(-1, { applyToSelection: this.hasSelection() });
+            this.changeIndent(-1, {
+              applyToSelection: this.hasSelection(),
+              includeChildren: false,
+            });
           } else {
-            this.changeIndent(1, { applyToSelection: this.hasSelection() });
+            this.changeIndent(1, {
+              applyToSelection: this.hasSelection(),
+              includeChildren: false,
+            });
           }
           break;
         case "Backspace":
@@ -487,7 +504,10 @@ document.addEventListener("DOMContentLoaded", () => {
         case " ":
           if (this.state.cursor.charIndex === 0) {
             e.preventDefault();
-            this.changeIndent(1, { applyToSelection: this.hasSelection() });
+            this.changeIndent(1, {
+              applyToSelection: this.hasSelection(),
+              includeChildren: false,
+            });
           }
           break;
         case "[":
@@ -540,7 +560,10 @@ document.addEventListener("DOMContentLoaded", () => {
           if (shift) {
             this.moveCursorByWord(-1, true);
           } else {
-            this.changeIndent(-1, { applyToSelection: this.hasSelection() });
+            this.changeIndent(-1, {
+              applyToSelection: this.hasSelection(),
+              includeChildren: false,
+            });
           }
           return true;
         case "arrowright":
@@ -548,7 +571,10 @@ document.addEventListener("DOMContentLoaded", () => {
           if (shift) {
             this.moveCursorByWord(1, true);
           } else {
-            this.changeIndent(1, { applyToSelection: this.hasSelection() });
+            this.changeIndent(1, {
+              applyToSelection: this.hasSelection(),
+              includeChildren: false,
+            });
           }
           return true;
         case "enter":
@@ -557,7 +583,10 @@ document.addEventListener("DOMContentLoaded", () => {
           return true;
         case "tab":
           e.preventDefault();
-          this.changeIndent(1, { applyToSelection: this.hasSelection() });
+          this.changeIndent(1, {
+            applyToSelection: this.hasSelection(),
+            includeChildren: false,
+          });
           return true;
         case "x":
         case "c":
@@ -955,20 +984,28 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     changeIndent(delta, options = {}) {
-      const { applyToSelection = false } = options;
+      const { applyToSelection = false, includeChildren = false } = options;
       const range = applyToSelection
         ? this.getSelectionLineRange()
         : { start: this.state.cursor.lineIndex, end: this.state.cursor.lineIndex };
       if (!range) return;
       this.saveHistory();
-      let index = range.start;
-      while (index <= range.end && index < this.state.lines.length) {
-        const blockEnd = this.getDescendantEnd(index);
-        for (let i = index; i < blockEnd; i += 1) {
+      if (includeChildren) {
+        let index = range.start;
+        while (index <= range.end && index < this.state.lines.length) {
+          const blockEnd = this.getDescendantEnd(index);
+          for (let i = index; i < blockEnd; i += 1) {
+            const line = this.state.lines[i];
+            line.indent = Math.max(0, line.indent + delta);
+          }
+          index = blockEnd;
+        }
+      } else {
+        for (let i = range.start; i <= range.end && i < this.state.lines.length; i += 1) {
           const line = this.state.lines[i];
+          if (!line) continue;
           line.indent = Math.max(0, line.indent + delta);
         }
-        index = blockEnd;
       }
       this.invalidateLayout();
     }
