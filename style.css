@@ -1,0 +1,51 @@
+/* --- 全体レイアウトとタイポグラフィ --- */
+body {
+  font-family: "Space Mono", "Noto Sans JP", monospace;
+  background-color: #282c34;
+  color: #abb2bf;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  margin: 0;
+}
+
+h1 {
+  font-weight: 400;
+}
+
+p {
+  margin-top: 20px;
+  color: #888;
+  font-size: 14px;
+}
+
+/* --- エディタのコンテナ --- */
+#editor-container {
+  position: relative;
+  border: 1px solid #444;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+canvas {
+  display: block;
+  background-color: #282c34;
+  cursor: text;
+}
+
+/* --- IMEやキーボード入力処理用の非表示テキストエリア --- */
+#hidden-input {
+  position: absolute;
+  width: 1px;
+  height: 1.2em;
+  opacity: 0;
+  pointer-events: none;
+  font-size: 16px;
+  padding: 0;
+  border: none;
+  resize: none;
+  overflow: hidden;
+  ime-mode: active;
+}
