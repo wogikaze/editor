@@ -485,14 +485,21 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
 
-      if (alt && !ctrl && (key === "ArrowLeft" || key === "ArrowRight")) {
-        e.preventDefault();
-        const delta = key === "ArrowLeft" ? -1 : 1;
-        this.changeIndent(delta, {
-          applyToSelection: this.hasSelection(),
-          includeChildren: true,
-        });
-        return;
+      if (alt && !ctrl) {
+        if (key === "ArrowLeft" || key === "ArrowRight") {
+          e.preventDefault();
+          const delta = key === "ArrowLeft" ? -1 : 1;
+          this.changeIndent(delta, {
+            applyToSelection: this.hasSelection(),
+            includeChildren: true,
+          });
+          return;
+        }
+        if (key === "ArrowUp" || key === "ArrowDown") {
+          e.preventDefault();
+          this.moveBlock(key === "ArrowUp" ? -1 : 1);
+          return;
+        }
       }
 
       switch (key) {
@@ -615,11 +622,11 @@ document.addEventListener("DOMContentLoaded", () => {
           return true;
         case "arrowup":
           e.preventDefault();
-          this.moveBlock(-1);
+          this.moveLine(-1);
           return true;
         case "arrowdown":
           e.preventDefault();
-          this.moveBlock(1);
+          this.moveLine(1);
           return true;
         case "arrowleft":
           e.preventDefault();
@@ -1088,6 +1095,89 @@ document.addEventListener("DOMContentLoaded", () => {
           Math.min(this.state.cursor.charIndex, line.text.length)
         );
       }
+    }
+
+    moveLine(delta) {
+      if (delta === 0) return;
+      const range = this.getSelectionLineRange();
+      const hasSelection = Boolean(range);
+      const start = hasSelection
+        ? range.start
+        : this.state.cursor.lineIndex;
+      const end = hasSelection
+        ? range.end
+        : this.state.cursor.lineIndex;
+      if (delta < 0 && start + delta < 0) return;
+      if (delta > 0 && end + delta >= this.state.lines.length) return;
+
+      const originalCursor = { ...this.state.cursor };
+      const originalSelection = this.state.selection
+        ? {
+          start: { ...this.state.selection.start },
+          end: { ...this.state.selection.end },
+        }
+        : null;
+      const originalAnchor = this.selectionAnchor
+        ? { ...this.selectionAnchor }
+        : null;
+
+      this.saveHistory();
+
+      const blockLength = end - start + 1;
+      const lines = this.state.lines;
+      const block = lines.splice(start, blockLength);
+      const insertIndex = start + delta;
+      lines.splice(insertIndex, 0, ...block);
+
+      const shiftPoint = (point) => {
+        if (!point) return null;
+        if (point.lineIndex < start || point.lineIndex > end) {
+          return { ...point };
+        }
+        return { ...point, lineIndex: point.lineIndex + delta };
+      };
+
+      const newCursor = shiftPoint(originalCursor) || {
+        lineIndex: originalCursor.lineIndex,
+        charIndex: originalCursor.charIndex,
+      };
+
+      if (originalSelection) {
+        const newSelection = {
+          start: shiftPoint(originalSelection.start) || {
+            ...originalSelection.start,
+          },
+          end: shiftPoint(originalSelection.end) || {
+            ...originalSelection.end,
+          },
+        };
+        this.state.selection = newSelection;
+      }
+
+      if (originalAnchor) {
+        this.selectionAnchor = shiftPoint(originalAnchor) || {
+          ...originalAnchor,
+        };
+      }
+
+      this.setCursor(newCursor.lineIndex, newCursor.charIndex, {
+        resetSelection: !originalSelection,
+      });
+
+      if (originalSelection && this.state.selection) {
+        this.state.selection = {
+          start: {
+            lineIndex: this.state.selection.start.lineIndex,
+            charIndex: this.state.selection.start.charIndex,
+          },
+          end: {
+            lineIndex: this.state.selection.end.lineIndex,
+            charIndex: this.state.selection.end.charIndex,
+          },
+        };
+      }
+
+      this.invalidateLayout();
     }
 
     moveBlock(direction) {
