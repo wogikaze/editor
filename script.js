@@ -35,7 +35,7 @@ document.addEventListener("DOMContentLoaded", () => {
       this.selectionAnchor = null;
       this.preferredCursorX = -1;
 
-      this.charWidthCache = new Map();
+      this.textWidthCache = new Map();
       this.visibleLinesCache = null;
 
       this.init();
@@ -1326,19 +1326,18 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     measureText(text) {
-      let width = 0;
-      for (const char of text) {
-        width += this.getCharWidth(char);
+      if (text.length === 0) {
+        return 0;
       }
-      return width;
-    }
-
-    getCharWidth(char) {
-      if (this.charWidthCache.has(char)) {
-        return this.charWidthCache.get(char);
+      const cachedWidth = this.textWidthCache.get(text);
+      if (cachedWidth !== undefined) {
+        return cachedWidth;
       }
-      const width = this.ctx.measureText(char).width;
-      this.charWidthCache.set(char, width);
+      const width = this.ctx.measureText(text).width;
+      if (this.textWidthCache.size > 10000) {
+        this.textWidthCache.clear();
+      }
+      this.textWidthCache.set(text, width);
       return width;
     }
   }
