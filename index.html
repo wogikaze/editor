@@ -23,6 +23,72 @@
         autocapitalize="off"
         spellcheck="false"
       ></textarea>
+      <div id="search-panel" class="search-panel hidden" aria-hidden="true">
+        <div class="search-row">
+          <button
+            type="button"
+            id="search-toggle-replace"
+            class="search-button secondary"
+            aria-pressed="false"
+          >
+            置換
+          </button>
+          <textarea
+            id="search-query"
+            class="search-input"
+            rows="1"
+            placeholder="検索"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+          ></textarea>
+          <label class="search-option" title="大文字と小文字を区別">
+            <input type="checkbox" id="search-case" />
+            <span>Aa</span>
+          </label>
+          <label class="search-option" title="正規表現を使用">
+            <input type="checkbox" id="search-regex" />
+            <span>.*</span>
+          </label>
+          <div id="search-result" class="search-result">0 / 0</div>
+          <div class="search-nav">
+            <button type="button" id="search-prev" class="search-button" title="前の一致 (Shift+Enter)">
+              ↑
+            </button>
+            <button type="button" id="search-next" class="search-button" title="次の一致 (Enter)">
+              ↓
+            </button>
+          </div>
+          <label class="search-option" title="選択範囲を検索">
+            <input type="checkbox" id="search-selection" />
+            <span>選択範囲</span>
+          </label>
+          <button type="button" id="search-close" class="search-button secondary" title="閉じる (Esc)">
+            ×
+          </button>
+        </div>
+        <div id="search-replace-row" class="search-row hidden">
+          <textarea
+            id="search-replace"
+            class="search-input"
+            rows="1"
+            placeholder="置換"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+          ></textarea>
+          <div class="search-replace-actions">
+            <button type="button" id="search-replace-one" class="search-button primary">
+              置換
+            </button>
+            <button type="button" id="search-replace-all" class="search-button primary">
+              すべて置換
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
     <p>コードをHTML, CSS, JavaScriptに分割し、可読性を向上させました。</p>
 
