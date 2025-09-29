@@ -1086,9 +1086,9 @@ document.addEventListener("DOMContentLoaded", () => {
       this.ctx.fillStyle = this.config.colors.selection;
       this.ctx.fillRect(
         selectionStartX,
-        y + this.typography.paddingTop,
+        y,
         Math.max(2, selectionEndX - selectionStartX),
-        Math.max(2, this.typography.cursorHeight)
+        this.state.view.lineHeight
       );
     }
 
@@ -1138,15 +1138,15 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     renderCursor() {
       if (!this.isFocused || this.isComposing) return;
-      const { x, worldCursorTop, line } = this.getCursorCoords();
+      const { x, worldLineTop, line } = this.getCursorCoords();
       if (!line) return;
       if (this.cursorBlinkState) {
         this.ctx.fillStyle = this.config.colors.cursor;
         this.ctx.fillRect(
           x,
-          worldCursorTop,
+          worldLineTop,
           2,
-          Math.max(2, this.typography.cursorHeight)
+          this.state.view.lineHeight
         );
       }
     }
