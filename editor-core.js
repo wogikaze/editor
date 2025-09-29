@@ -154,6 +154,7 @@ class CanvasEditor extends CanvasRenderer {
         if (e.data) {
           this.insertText(e.data);
         }
+        this.textarea.value = "";
       });
       this.textarea.addEventListener("copy", this.onCopy.bind(this));
       this.textarea.addEventListener("cut", this.onCut.bind(this));
