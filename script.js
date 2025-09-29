@@ -113,6 +113,15 @@ document.addEventListener("DOMContentLoaded", () => {
       );
       this.bindEvents();
       this.initSearchUI();
+      if (document.fonts && document.fonts.ready) {
+        document.fonts
+          .ready
+          .then(() => {
+            this.updateTypographyMetrics();
+            this.invalidateLayout();
+          })
+          .catch(() => {});
+      }
       requestAnimationFrame(this.renderLoop.bind(this));
     }
 
@@ -124,6 +133,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     updateTypographyMetrics() {
       this.ctx.font = this.state.view.font;
+      this.textWidthCache.clear();
+      this.lineLayouts.clear();
       const previousLineHeight = this.state.view.lineHeight;
       const fontSize = this.getFontPixelSize();
       const spaceMetrics = this.ctx.measureText(" ");
@@ -139,8 +150,15 @@ document.addEventListener("DOMContentLoaded", () => {
       const availablePadding = Math.max(0, computedLineHeight - glyphHeight);
       const paddingTop = Math.floor(availablePadding / 2);
       const paddingBottom = availablePadding - paddingTop;
+      const boundingWidth =
+        spaceMetrics.actualBoundingBoxLeft !== undefined &&
+        spaceMetrics.actualBoundingBoxRight !== undefined
+          ? Math.abs(spaceMetrics.actualBoundingBoxRight) +
+            Math.abs(spaceMetrics.actualBoundingBoxLeft)
+          : 0;
+      const spaceAdvance = Math.max(spaceMetrics.width ?? 0, boundingWidth);
       const spaceWidthFallback = fontSize * 0.5;
-      const spaceWidth = spaceMetrics.width || spaceWidthFallback;
+      const spaceWidth = spaceAdvance > 0 ? spaceAdvance : spaceWidthFallback;
       this.typography = {
         spaceWidth,
         ascent,
@@ -153,10 +171,7 @@ document.addEventListener("DOMContentLoaded", () => {
       };
       this.state.view.lineHeight = computedLineHeight;
       const indentMinimum = Math.max(spaceWidth * 2, fontSize * 0.9);
-      this.state.view.indentWidth = Math.max(
-        Math.round(indentMinimum),
-        Math.round(this.state.view.indentWidth)
-      );
+      this.state.view.indentWidth = Math.max(Math.round(indentMinimum), 4);
       if (this.textarea) {
         this.textarea.style.font = this.state.view.font;
         this.textarea.style.lineHeight = `${Math.round(this.typography.cursorHeight)}px`;
