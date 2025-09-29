@@ -40,6 +40,13 @@ document.addEventListener("DOMContentLoaded", () => {
       this.lineLayouts = new Map();
       this.ignoreNextClick = false;
       this.draggedDuringClick = false;
+      this.typography = {
+        spaceWidth: 0,
+        ascent: 0,
+        descent: 0,
+        glyphHeight: this.state.view.lineHeight,
+        baselineOffset: Math.floor(this.state.view.lineHeight / 2),
+      };
 
       this.init();
     }
@@ -83,6 +90,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     init() {
       this.ctx.font = this.state.view.font;
+      this.ctx.textBaseline = "alphabetic";
+      this.updateTypographyMetrics();
       this.visibleLineCapacity = Math.max(
         1,
         Math.floor(
@@ -92,6 +101,54 @@ document.addEventListener("DOMContentLoaded", () => {
       );
       this.bindEvents();
       requestAnimationFrame(this.renderLoop.bind(this));
+    }
+
+    getFontPixelSize() {
+      const match = /([0-9]+(?:\.[0-9]+)?)px/.exec(this.state.view.font);
+      if (!match) return 16;
+      return parseFloat(match[1]);
+    }
+
+    updateTypographyMetrics() {
+      this.ctx.font = this.state.view.font;
+      const previousLineHeight = this.state.view.lineHeight;
+      const fontSize = this.getFontPixelSize();
+      const spaceMetrics = this.ctx.measureText(" ");
+      const probeMetrics = this.ctx.measureText("Ｍ");
+      const ascent = probeMetrics.actualBoundingBoxAscent ?? fontSize * 0.8;
+      const descent = probeMetrics.actualBoundingBoxDescent ?? fontSize * 0.2;
+      const glyphHeight = Math.ceil(ascent + descent);
+      const minimumPadding = Math.ceil(fontSize * 0.1);
+      const computedLineHeight = Math.max(
+        glyphHeight + minimumPadding * 2,
+        previousLineHeight
+      );
+      const availablePadding = Math.max(0, computedLineHeight - glyphHeight);
+      const paddingTop = Math.floor(availablePadding / 2);
+      const paddingBottom = availablePadding - paddingTop;
+      const spaceWidthFallback = fontSize * 0.5;
+      const spaceWidth = spaceMetrics.width || spaceWidthFallback;
+      this.typography = {
+        spaceWidth,
+        ascent,
+        descent,
+        glyphHeight,
+        baselineOffset: paddingTop + ascent,
+        paddingTop,
+        paddingBottom,
+        cursorHeight: glyphHeight,
+      };
+      this.state.view.lineHeight = computedLineHeight;
+      const indentMinimum = Math.max(spaceWidth * 2, fontSize * 0.9);
+      this.state.view.indentWidth = Math.max(
+        Math.round(indentMinimum),
+        Math.round(this.state.view.indentWidth)
+      );
+      if (this.textarea) {
+        this.textarea.style.font = this.state.view.font;
+        this.textarea.style.lineHeight = `${Math.round(this.typography.cursorHeight)}px`;
+        this.textarea.style.height = `${Math.max(1, Math.round(this.typography.cursorHeight))}px`;
+      }
     }
 
     bindEvents() {
@@ -197,7 +254,6 @@ document.addEventListener("DOMContentLoaded", () => {
       if (lineIndex < start.lineIndex || lineIndex > end.lineIndex) return;
 
       const line = this.state.lines[lineIndex];
-      const lineHeight = this.state.view.lineHeight;
       const indentX =
         this.config.padding + line.indent * this.state.view.indentWidth;
       let selectionStartX = indentX;
@@ -220,9 +276,9 @@ document.addEventListener("DOMContentLoaded", () => {
       this.ctx.fillStyle = this.config.colors.selection;
       this.ctx.fillRect(
         selectionStartX,
-        y,
+        y + this.typography.paddingTop,
         Math.max(2, selectionEndX - selectionStartX),
-        lineHeight
+        Math.max(2, this.typography.cursorHeight)
       );
     }
 
@@ -233,17 +289,17 @@ document.addEventListener("DOMContentLoaded", () => {
         this.config.padding +
         line.indent * indentWidth -
         indentWidth * 0.7;
-      const iconY = y + this.state.view.lineHeight / 2 + 4;
+      const iconBaseline = y + this.typography.baselineOffset;
       this.ctx.fillStyle = this.config.colors.text;
       const icon = line.collapsed ? "▶" : "▼";
-      this.ctx.fillText(icon, iconX, iconY);
+      this.ctx.fillText(icon, iconX, iconBaseline);
     }
 
     renderLineText(line, lineIndex, y) {
       const indentWidth = this.state.view.indentWidth;
       const indentX =
         this.config.padding + line.indent * indentWidth;
-      const baseline = y + this.state.view.lineHeight / 2 + 1;
+      const baseline = y + this.typography.baselineOffset;
       const segments = this.getRenderedSegments(line, lineIndex);
       let cursorX = indentX;
       const clickableSegments = [];
@@ -272,26 +328,31 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     renderCursor() {
       if (!this.isFocused || this.isComposing) return;
-      const { x, y, line } = this.getCursorCoords();
+      const { x, cursorTop, line } = this.getCursorCoords();
       if (!line) return;
-      const lineHeight = this.state.view.lineHeight;
       if (this.cursorBlinkState) {
         this.ctx.fillStyle = this.config.colors.cursor;
-        this.ctx.fillRect(x, y, 2, lineHeight);
+        this.ctx.fillRect(
+          x,
+          cursorTop,
+          2,
+          Math.max(2, this.typography.cursorHeight)
+        );
       }
     }
 
     renderCompositionText() {
-      const { x, y } = this.getCursorCoords();
-      const baseline = y + this.state.view.lineHeight / 2 + 1;
+      const { x, cursorTop, baseline } = this.getCursorCoords();
+      const glyphHeight = Math.max(2, this.typography.cursorHeight);
       this.ctx.fillStyle = this.config.colors.text;
       this.ctx.fillText(this.compositionText, x, baseline);
       const width = this.measureText(this.compositionText);
       this.ctx.strokeStyle = this.config.colors.imeUnderline;
       this.ctx.lineWidth = 1;
       this.ctx.beginPath();
-      this.ctx.moveTo(x, y + this.state.view.lineHeight - 2);
-      this.ctx.lineTo(x + width, y + this.state.view.lineHeight - 2);
+      const underlineY = cursorTop + glyphHeight + Math.max(0, this.typography.paddingBottom - 2);
+      this.ctx.moveTo(x, underlineY);
+      this.ctx.lineTo(x + width, underlineY);
       this.ctx.stroke();
     }
 
@@ -1239,16 +1300,18 @@ document.addEventListener("DOMContentLoaded", () => {
         this.config.padding + line.indent * this.state.view.indentWidth;
       const x =
         indentX + this.measureText(textBefore);
-      const y =
+      const lineTop =
         this.config.padding + visibleIndex * this.state.view.lineHeight - this.state.view.scrollTop;
-      return { x, y, line };
+      const cursorTop = lineTop + this.typography.paddingTop;
+      const baseline = lineTop + this.typography.baselineOffset;
+      return { x, y: lineTop, cursorTop, baseline, line };
     }
 
     updateTextareaPosition() {
       if (!this.isFocused) return;
-      const { x, y } = this.getCursorCoords();
+      const { x, cursorTop } = this.getCursorCoords();
       this.textarea.style.left = `${x}px`;
-      this.textarea.style.top = `${y}px`;
+      this.textarea.style.top = `${cursorTop}px`;
     }
 
     ensureCursorVisibleWhileDragging(mouseY) {
