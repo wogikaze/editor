@@ -56,8 +56,9 @@ canvas {
   ime-mode: active;
 }
 
-.hidden {
-  display: none !important;
+#editor-container .hidden,
+body .hidden {
+  display: none;
 }
 
 /* --- 検索パネル --- */

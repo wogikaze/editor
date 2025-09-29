@@ -55,6 +55,16 @@ document.addEventListener("DOMContentLoaded", () => {
       this.init();
     }
 
+    scheduleMarkDocumentVersion() {
+      if (this._markVersionTimeout) {
+        clearTimeout(this._markVersionTimeout);
+      }
+      this._markVersionTimeout = setTimeout(() => {
+        this.markDocumentVersion();
+        this._markVersionTimeout = null;
+      }, 50);
+    }
+
     createInitialState() {
       const lines = [
         this.createLine("インデントが1の次に3になる場合もあります。", 0),
@@ -103,7 +113,7 @@ document.addEventListener("DOMContentLoaded", () => {
       );
       this.bindEvents();
       this.initSearchUI();
-      requestAnimationFrame(this.renderLoop.bind(this));
+      requestAnimationFrame(this.updateAndRenderLoop.bind(this));
     }
 
     bindEvents() {
@@ -177,21 +187,7 @@ document.addEventListener("DOMContentLoaded", () => {
         lastSelectionText: "",
       };
 
-      if (
-        !search.queryInput ||
-        !search.replaceInput ||
-        !search.toggleReplaceButton ||
-        !search.caseCheckbox ||
-        !search.regexCheckbox ||
-        !search.selectionCheckbox ||
-        !search.resultLabel ||
-        !search.prevButton ||
-        !search.nextButton ||
-        !search.closeButton ||
-        !search.replaceButton ||
-        !search.replaceAllButton ||
-        !search.replaceRow
-      ) {
+      if (!this.validateSearchElements(search)) {
         this.search = null;
         return;
       }
@@ -200,6 +196,24 @@ document.addEventListener("DOMContentLoaded", () => {
       this.bindSearchEvents();
       this.updateSearchPanelVisibility();
       this.updateSearchUIState();
+    }
+
+    validateSearchElements(search) {
+      return (
+        search.queryInput &&
+        search.replaceInput &&
+        search.toggleReplaceButton &&
+        search.caseCheckbox &&
+        search.regexCheckbox &&
+        search.selectionCheckbox &&
+        search.resultLabel &&
+        search.prevButton &&
+        search.nextButton &&
+        search.closeButton &&
+        search.replaceButton &&
+        search.replaceAllButton &&
+        search.replaceRow
+      );
     }
 
     bindSearchEvents() {
@@ -337,6 +351,13 @@ document.addEventListener("DOMContentLoaded", () => {
         event.preventDefault();
         this.closeSearchPanel();
       }
+    }
+
+    now() {
+      if (typeof performance !== "undefined" && typeof performance.now === "function") {
+        return performance.now();
+      }
+      return Date.now();
     }
 
     handleReplaceInputKeydown(event) {
@@ -566,25 +587,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
     computeMatches({ query, useRegex, caseSensitive, scope }) {
       const matches = [];
-      const lines = this.state.lines;
-      if (!query) {
-        return { matches, regexError: null };
-      }
-
-      const startLine = scope ? scope.start.lineIndex : 0;
-      const endLine = scope ? scope.end.lineIndex : lines.length - 1;
-
-      const timeoutMs = this.config.search?.regexTimeoutMs ?? 0;
-      const timeoutEnabled = Number.isFinite(timeoutMs) && timeoutMs > 0;
-      const now =
-        typeof performance !== "undefined" && typeof performance.now === "function"
-          ? () => performance.now()
-          : () => Date.now();
-      const deadline = timeoutEnabled ? now() + timeoutMs : null;
+      const deadline = timeoutEnabled ? this.now() + timeoutMs : null;
       let timedOut = false;
       const checkTimeout = () => {
         if (!timeoutEnabled) return false;
-        if (now() > deadline) {
+        if (this.now() > deadline) {
           timedOut = true;
           return true;
         }
@@ -614,11 +621,8 @@ document.addEventListener("DOMContentLoaded", () => {
               ? scope.end.charIndex
               : line.text.length;
           if (limitStart >= limitEnd) continue;
-
-          regex.lastIndex = 0;
-          let match;
           while ((match = regex.exec(line.text)) !== null) {
-            const text = match[0] ?? "";
+            const text = match[0];
             const matchStart = match.index;
             const matchEnd = matchStart + text.length;
             if (text.length === 0) {
@@ -694,14 +698,14 @@ document.addEventListener("DOMContentLoaded", () => {
         if (timeoutMs >= 1000) {
           const seconds = timeoutMs / 1000;
           formattedTimeout = Number.isInteger(seconds)
-            ? `${seconds}秒`
-            : `${seconds.toFixed(1)}秒`;
+            ? `${seconds} seconds`
+            : `${seconds.toFixed(1)} seconds`;
         } else {
-          formattedTimeout = `${timeoutMs}ミリ秒`;
+          formattedTimeout = `${timeoutMs} ms`;
         }
         return {
           matches: [],
-          regexError: `検索がタイムアウトしました (${formattedTimeout})`,
+          regexError: `Search timed out (${formattedTimeout})`,
         };
       }
 
@@ -805,7 +809,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const closing = pattern.indexOf(">", i + 2);
             if (closing !== -1) {
               const name = pattern.slice(i + 2, closing);
-              if (Object.prototype.hasOwnProperty.call(named, name)) {
+              if (typeof name === "string" && name.length > 0 && Object.hasOwn(named, name)) {
                 result += named[name] ?? "";
               }
               i = closing;
@@ -904,7 +908,7 @@ document.addEventListener("DOMContentLoaded", () => {
       this.invalidateLayout();
       this.updateSearchResults({ preserveActive: false });
     }
-    renderLoop(timestamp) {
+    updateAndRenderLoop(timestamp) {
       if (
         this.search &&
         this.search.isOpen &&
@@ -916,7 +920,7 @@ document.addEventListener("DOMContentLoaded", () => {
       this.updateCursorBlink(timestamp);
       this.render();
       this.updateTextareaPosition();
-      requestAnimationFrame(this.renderLoop.bind(this));
+      requestAnimationFrame(this.updateAndRenderLoop.bind(this));
     }
 
     render() {
@@ -1521,7 +1525,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
       if (parts.length === 1) {
         line.text = head + text + tail;
-        this.markDocumentVersion();
+        this.scheduleMarkDocumentVersion();
         this.setCursor(cursor.lineIndex, cursor.charIndex + text.length);
         return;
       }
@@ -1578,7 +1582,8 @@ document.addEventListener("DOMContentLoaded", () => {
       } else {
         const cursor = this.state.cursor;
         const line = this.state.lines[cursor.lineIndex];
-        const head = line.text.slice(0, cursor.charIndex);
+        this.setCursor(cursor.lineIndex, cursor.charIndex + 1);
+        this.scheduleMarkDocumentVersion();
         const tail = line.text.slice(cursor.charIndex);
         line.text = `${head}[]${tail}`;
         this.markDocumentVersion();
