@@ -154,6 +154,7 @@ class CanvasEditor extends CanvasRenderer {
         if (e.data) {
           this.insertText(e.data);
         }
+        this.textarea.value = "";
       });
       this.textarea.addEventListener("copy", this.onCopy.bind(this));
       this.textarea.addEventListener("cut", this.onCut.bind(this));
@@ -711,8 +712,9 @@ class CanvasEditor extends CanvasRenderer {
       const prevLine = this.state.lines[prevLineIndex];
       const prevLength = prevLine.text.length;
       prevLine.text += line.text;
-      const blockLength = this.getDescendantEnd(cursor.lineIndex) - cursor.lineIndex;
-      this.state.lines.splice(cursor.lineIndex, blockLength);
+      const blockEnd = this.getDescendantEnd(cursor.lineIndex);
+      const hasChildren = blockEnd > cursor.lineIndex + 1;
+      this.state.lines.splice(cursor.lineIndex, hasChildren ? 1 : blockEnd - cursor.lineIndex);
       this.markDocumentVersion();
       this.setCursor(prevLineIndex, prevLength);
       this.invalidateLayout();
