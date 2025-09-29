@@ -21,6 +21,8 @@ document.addEventListener("DOMContentLoaded", () => {
           link: "#61afef",
           relativeLink: "#98c379",
           overwriteCursor: "rgba(82, 139, 255, 0.5)",
+          searchMatch: "rgba(229, 192, 123, 0.35)",
+          searchActiveMatch: "rgba(229, 192, 123, 0.6)",
         },
       };
 
@@ -40,6 +42,8 @@ document.addEventListener("DOMContentLoaded", () => {
       this.lineLayouts = new Map();
       this.ignoreNextClick = false;
       this.draggedDuringClick = false;
+
+      this.documentVersion = 0;
 
       this.init();
     }
@@ -91,6 +95,7 @@ document.addEventListener("DOMContentLoaded", () => {
         )
       );
       this.bindEvents();
+      this.initSearchUI();
       requestAnimationFrame(this.renderLoop.bind(this));
     }
 
@@ -130,7 +135,699 @@ document.addEventListener("DOMContentLoaded", () => {
       this.textarea.addEventListener("paste", this.onPaste.bind(this));
     }
 
+    initSearchUI() {
+      const panel = document.getElementById("search-panel");
+      if (!panel) {
+        this.search = null;
+        return;
+      }
+
+      const search = {
+        panel,
+        queryInput: document.getElementById("search-query"),
+        replaceInput: document.getElementById("search-replace"),
+        toggleReplaceButton: document.getElementById("search-toggle-replace"),
+        caseCheckbox: document.getElementById("search-case"),
+        regexCheckbox: document.getElementById("search-regex"),
+        selectionCheckbox: document.getElementById("search-selection"),
+        resultLabel: document.getElementById("search-result"),
+        prevButton: document.getElementById("search-prev"),
+        nextButton: document.getElementById("search-next"),
+        closeButton: document.getElementById("search-close"),
+        replaceButton: document.getElementById("search-replace-one"),
+        replaceAllButton: document.getElementById("search-replace-all"),
+        replaceRow: document.getElementById("search-replace-row"),
+        isOpen: false,
+        showReplace: false,
+        matches: [],
+        matchesByLine: new Map(),
+        activeIndex: -1,
+        selectionScope: null,
+        lastEvaluatedVersion: -1,
+        needsUpdate: false,
+        regexError: null,
+        lastSelectionText: "",
+      };
+
+      if (
+        !search.queryInput ||
+        !search.replaceInput ||
+        !search.toggleReplaceButton ||
+        !search.caseCheckbox ||
+        !search.regexCheckbox ||
+        !search.selectionCheckbox ||
+        !search.resultLabel ||
+        !search.prevButton ||
+        !search.nextButton ||
+        !search.closeButton ||
+        !search.replaceButton ||
+        !search.replaceAllButton ||
+        !search.replaceRow
+      ) {
+        this.search = null;
+        return;
+      }
+
+      this.search = search;
+      this.bindSearchEvents();
+      this.updateSearchPanelVisibility();
+      this.updateSearchUIState();
+    }
+
+    bindSearchEvents() {
+      const search = this.search;
+      if (!search) return;
+
+      search.panel.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+
+      search.toggleReplaceButton.addEventListener("click", () => {
+        this.toggleReplacePanel();
+      });
+
+      search.queryInput.addEventListener("input", () => {
+        this.handleSearchQueryInput();
+      });
+
+      search.queryInput.addEventListener("keydown", (event) => {
+        this.handleSearchQueryKeydown(event);
+      });
+
+      search.replaceInput.addEventListener("keydown", (event) => {
+        this.handleReplaceInputKeydown(event);
+      });
+
+      search.caseCheckbox.addEventListener("change", () => {
+        this.handleSearchOptionChange();
+      });
+
+      search.regexCheckbox.addEventListener("change", () => {
+        this.handleSearchOptionChange();
+      });
+
+      search.selectionCheckbox.addEventListener("change", () => {
+        this.handleSearchSelectionToggle();
+      });
+
+      search.prevButton.addEventListener("click", () => {
+        this.stepSearchMatch(-1);
+      });
+
+      search.nextButton.addEventListener("click", () => {
+        this.stepSearchMatch(1);
+      });
+
+      search.closeButton.addEventListener("click", () => {
+        this.closeSearchPanel();
+      });
+
+      search.replaceButton.addEventListener("click", () => {
+        this.replaceCurrentMatch();
+      });
+
+      search.replaceAllButton.addEventListener("click", () => {
+        this.replaceAllMatches();
+      });
+
+      window.addEventListener("keydown", (event) => {
+        this.handleGlobalSearchKeydown(event);
+      });
+    }
+
+    updateSearchPanelVisibility() {
+      const search = this.search;
+      if (!search) return;
+      search.toggleReplaceButton.setAttribute(
+        "aria-pressed",
+        search.showReplace ? "true" : "false"
+      );
+      if (search.showReplace) {
+        search.replaceRow.classList.remove("hidden");
+      } else {
+        search.replaceRow.classList.add("hidden");
+      }
+    }
+
+    updateSearchUIState() {
+      const search = this.search;
+      if (!search) return;
+      this.updateSearchResultLabel();
+      this.updateSearchButtonsState();
+    }
+
+    updateSearchResultLabel() {
+      const search = this.search;
+      if (!search) return;
+      if (search.regexError) {
+        search.resultLabel.textContent = "エラー";
+        search.resultLabel.title = search.regexError;
+        search.resultLabel.classList.add("error");
+        return;
+      }
+      search.resultLabel.classList.remove("error");
+      search.resultLabel.title = "";
+      const total = search.matches.length;
+      const current = total > 0 && search.activeIndex >= 0 ? search.activeIndex + 1 : 0;
+      search.resultLabel.textContent = `${current} / ${total}`;
+    }
+
+    updateSearchButtonsState() {
+      const search = this.search;
+      if (!search) return;
+      const hasMatches = search.matches.length > 0 && !search.regexError;
+      const navButtons = [search.prevButton, search.nextButton];
+      navButtons.forEach((button) => {
+        button.disabled = !hasMatches;
+        button.setAttribute("aria-disabled", hasMatches ? "false" : "true");
+      });
+      const replaceButtons = [search.replaceButton, search.replaceAllButton];
+      replaceButtons.forEach((button) => {
+        const disabled = !hasMatches;
+        button.disabled = disabled;
+        button.setAttribute("aria-disabled", disabled ? "true" : "false");
+      });
+    }
+
+    handleSearchQueryInput() {
+      const search = this.search;
+      if (!search || !search.isOpen) return;
+      this.updateSearchResults({ preserveActive: false });
+    }
+
+    handleSearchQueryKeydown(event) {
+      if (!this.search || !this.search.isOpen) return;
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          this.stepSearchMatch(-1);
+        } else {
+          this.stepSearchMatch(1);
+        }
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        this.closeSearchPanel();
+      }
+    }
+
+    handleReplaceInputKeydown(event) {
+      if (!this.search || !this.search.isOpen) return;
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this.replaceCurrentMatch();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        this.closeSearchPanel();
+      }
+    }
+
+    handleSearchOptionChange() {
+      const search = this.search;
+      if (!search || !search.isOpen) return;
+      this.updateSearchResults({ preserveActive: false });
+    }
+
+    handleSearchSelectionToggle() {
+      const search = this.search;
+      if (!search || !search.isOpen) return;
+      if (search.selectionCheckbox.checked) {
+        search.selectionScope = this.captureSelectionScope();
+      } else {
+        search.selectionScope = null;
+      }
+      this.updateSearchResults({ preserveActive: false });
+    }
+
+    handleGlobalSearchKeydown(event) {
+      const search = this.search;
+      if (!search || !search.isOpen) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.closeSearchPanel();
+      }
+    }
+
+    openSearchPanel(options = {}) {
+      const search = this.search;
+      if (!search) return;
+      const { prefillSelection = true } = options;
+
+      if (prefillSelection) {
+        const selectionText = this.getSelectedText();
+        if (selectionText) {
+          search.queryInput.value = selectionText;
+          search.lastSelectionText = selectionText;
+        }
+      }
+
+      if (search.selectionCheckbox.checked) {
+        search.selectionScope = this.captureSelectionScope();
+      } else {
+        search.selectionScope = null;
+      }
+
+      search.panel.classList.remove("hidden");
+      search.panel.setAttribute("aria-hidden", "false");
+      search.isOpen = true;
+      search.needsUpdate = true;
+      this.updateSearchResults({ preserveActive: false });
+      setTimeout(() => {
+        search.queryInput.focus();
+        search.queryInput.select();
+      }, 0);
+    }
+
+    closeSearchPanel() {
+      const search = this.search;
+      if (!search || !search.isOpen) return;
+      search.isOpen = false;
+      search.panel.classList.add("hidden");
+      search.panel.setAttribute("aria-hidden", "true");
+      search.selectionScope = null;
+      this.clearSearchMatches();
+      this.focus();
+    }
+
+    toggleReplacePanel() {
+      const search = this.search;
+      if (!search) return;
+      search.showReplace = !search.showReplace;
+      this.updateSearchPanelVisibility();
+      const target = search.showReplace ? search.replaceInput : search.queryInput;
+      setTimeout(() => {
+        target.focus();
+        target.select();
+      }, 0);
+    }
+
+    captureSelectionScope() {
+      const selection = this.getNormalizedSelection();
+      if (!selection) {
+        return this.search ? this.search.selectionScope : null;
+      }
+      if (this.comparePoints(selection.start, selection.end) === 0) {
+        return this.search ? this.search.selectionScope : null;
+      }
+      return {
+        start: { ...selection.start },
+        end: { ...selection.end },
+      };
+    }
+
+    clearSearchMatches() {
+      const search = this.search;
+      if (!search) return;
+      search.matches = [];
+      search.matchesByLine.clear();
+      search.activeIndex = -1;
+      search.regexError = null;
+      search.resultLabel.textContent = "0 / 0";
+      search.resultLabel.classList.remove("error");
+      search.resultLabel.title = "";
+      search.needsUpdate = false;
+      search.lastEvaluatedVersion = this.documentVersion;
+      this.updateSearchButtonsState();
+    }
+
+    updateSearchResults(options = {}) {
+      const search = this.search;
+      if (!search || !search.isOpen) return;
+      const { preserveActive = false, preferredIndex = null } = options;
+      const query = search.queryInput.value;
+
+      if (search.selectionCheckbox.checked) {
+        const scope = this.captureSelectionScope();
+        if (scope) {
+          search.selectionScope = scope;
+        }
+      } else {
+        search.selectionScope = null;
+      }
+
+      if (!query) {
+        this.clearSearchMatches();
+        search.lastEvaluatedVersion = this.documentVersion;
+        search.needsUpdate = false;
+        return;
+      }
+
+      const previousActiveMatch =
+        preserveActive && search.activeIndex >= 0
+          ? search.matches[search.activeIndex]
+          : null;
+
+      const result = this.computeMatches({
+        query,
+        useRegex: search.regexCheckbox.checked,
+        caseSensitive: search.caseCheckbox.checked,
+        scope: search.selectionScope,
+      });
+
+      search.matches = result.matches;
+      search.regexError = result.regexError;
+      if (search.regexError) {
+        search.matches = [];
+        search.matchesByLine.clear();
+        search.activeIndex = -1;
+        this.updateSearchUIState();
+        search.lastEvaluatedVersion = this.documentVersion;
+        search.needsUpdate = false;
+        return;
+      }
+
+      search.matchesByLine = this.groupMatchesByLine(search.matches);
+
+      let nextActive = -1;
+      if (search.matches.length > 0) {
+        if (
+          preferredIndex !== null &&
+          preferredIndex >= 0 &&
+          preferredIndex < search.matches.length
+        ) {
+          nextActive = preferredIndex;
+        } else if (previousActiveMatch) {
+          nextActive = search.matches.findIndex(
+            (match) =>
+              match.lineIndex === previousActiveMatch.lineIndex &&
+              match.start === previousActiveMatch.start &&
+              match.end === previousActiveMatch.end
+          );
+        }
+        if (nextActive === -1) {
+          nextActive = 0;
+        }
+      }
+
+      this.setActiveMatch(nextActive, { scroll: true });
+      search.lastEvaluatedVersion = this.documentVersion;
+      search.needsUpdate = false;
+      this.updateSearchUIState();
+    }
+
+    computeMatches({ query, useRegex, caseSensitive, scope }) {
+      const matches = [];
+      const lines = this.state.lines;
+      if (!query) {
+        return { matches, regexError: null };
+      }
+
+      const startLine = scope ? scope.start.lineIndex : 0;
+      const endLine = scope ? scope.end.lineIndex : lines.length - 1;
+
+      if (useRegex) {
+        let regex;
+        try {
+          regex = new RegExp(query, caseSensitive ? "g" : "gi");
+        } catch (error) {
+          return { matches: [], regexError: error.message };
+        }
+
+        for (
+          let lineIndex = startLine;
+          lineIndex <= endLine && lineIndex < lines.length;
+          lineIndex += 1
+        ) {
+          const line = lines[lineIndex];
+          const limitStart =
+            scope && lineIndex === scope.start.lineIndex
+              ? scope.start.charIndex
+              : 0;
+          const limitEnd =
+            scope && lineIndex === scope.end.lineIndex
+              ? scope.end.charIndex
+              : line.text.length;
+          if (limitStart >= limitEnd) continue;
+
+          regex.lastIndex = 0;
+          let match;
+          while ((match = regex.exec(line.text)) !== null) {
+            const text = match[0] ?? "";
+            const matchStart = match.index;
+            const matchEnd = matchStart + text.length;
+            if (text.length === 0) {
+              regex.lastIndex += 1;
+              if (regex.lastIndex > line.text.length) break;
+              continue;
+            }
+            if (matchStart < limitStart || matchEnd > limitEnd) {
+              continue;
+            }
+            matches.push({
+              lineIndex,
+              start: matchStart,
+              end: matchEnd,
+              text,
+              groupValues: match.length > 1 ? match.slice(1) : null,
+              namedGroups: match.groups ? { ...match.groups } : null,
+            });
+          }
+        }
+      } else {
+        const needle = caseSensitive ? query : query.toLowerCase();
+        for (
+          let lineIndex = startLine;
+          lineIndex <= endLine && lineIndex < lines.length;
+          lineIndex += 1
+        ) {
+          const line = lines[lineIndex];
+          const haystack = caseSensitive ? line.text : line.text.toLowerCase();
+          const limitStart =
+            scope && lineIndex === scope.start.lineIndex
+              ? scope.start.charIndex
+              : 0;
+          const limitEnd =
+            scope && lineIndex === scope.end.lineIndex
+              ? scope.end.charIndex
+              : line.text.length;
+          if (limitStart >= limitEnd) continue;
+
+          let index = haystack.indexOf(needle, limitStart);
+          while (index !== -1 && index + needle.length <= limitEnd) {
+            matches.push({
+              lineIndex,
+              start: index,
+              end: index + needle.length,
+              text: line.text.slice(index, index + needle.length),
+              groupValues: null,
+              namedGroups: null,
+            });
+            if (needle.length === 0) {
+              index += 1;
+            } else {
+              index = haystack.indexOf(needle, index + needle.length);
+            }
+          }
+        }
+      }
+
+      return { matches, regexError: null };
+    }
+
+    groupMatchesByLine(matches) {
+      const map = new Map();
+      matches.forEach((match, index) => {
+        if (!map.has(match.lineIndex)) {
+          map.set(match.lineIndex, []);
+        }
+        map.get(match.lineIndex).push({
+          start: match.start,
+          end: match.end,
+          index,
+        });
+      });
+      return map;
+    }
+
+    setActiveMatch(index, options = {}) {
+      const search = this.search;
+      if (!search) return;
+      const { scroll = true } = options;
+      if (
+        index === -1 ||
+        index === undefined ||
+        index < 0 ||
+        index >= search.matches.length
+      ) {
+        search.activeIndex = -1;
+        this.updateSearchUIState();
+        return;
+      }
+      search.activeIndex = index;
+      this.updateSearchUIState();
+      const match = search.matches[index];
+      if (match) {
+        this.ensureMatchSelection(match, { scroll });
+      }
+    }
+
+    ensureMatchSelection(match, options = {}) {
+      const { scroll = true } = options;
+      this.setCursor(match.lineIndex, match.end, {
+        resetSelection: true,
+        scrollIntoView: scroll,
+      });
+      this.state.selection = {
+        start: { lineIndex: match.lineIndex, charIndex: match.start },
+        end: { lineIndex: match.lineIndex, charIndex: match.end },
+      };
+      this.selectionAnchor = { ...this.state.selection.start };
+    }
+
+    stepSearchMatch(direction) {
+      const search = this.search;
+      if (!search || search.matches.length === 0 || search.regexError) return;
+      const length = search.matches.length;
+      let nextIndex = search.activeIndex;
+      if (nextIndex === -1) {
+        nextIndex = direction > 0 ? 0 : length - 1;
+      } else {
+        nextIndex = (nextIndex + direction + length) % length;
+      }
+      this.setActiveMatch(nextIndex, { scroll: true });
+    }
+
+    applyReplacementPattern(match, pattern, fullText, useRegex) {
+      if (!useRegex) return pattern;
+      if (!pattern.includes("$")) return pattern;
+      const groups = match.groupValues || [];
+      const named = match.namedGroups || {};
+      let result = "";
+      for (let i = 0; i < pattern.length; i += 1) {
+        const char = pattern[i];
+        if (char === "$" && i < pattern.length - 1) {
+          const next = pattern[i + 1];
+          if (next === "$") {
+            result += "$";
+            i += 1;
+            continue;
+          }
+          if (next === "&") {
+            result += match.text;
+            i += 1;
+            continue;
+          }
+          if (next === "`") {
+            result += fullText.slice(0, match.start);
+            i += 1;
+            continue;
+          }
+          if (next === "'") {
+            result += fullText.slice(match.end);
+            i += 1;
+            continue;
+          }
+          if (next === "<") {
+            const closing = pattern.indexOf(">", i + 2);
+            if (closing !== -1) {
+              const name = pattern.slice(i + 2, closing);
+              if (Object.prototype.hasOwnProperty.call(named, name)) {
+                result += named[name] ?? "";
+              }
+              i = closing;
+              continue;
+            }
+          }
+          if (/\d/.test(next)) {
+            let j = i + 1;
+            let digits = "";
+            while (j < pattern.length && /\d/.test(pattern[j]) && digits.length < 2) {
+              digits += pattern[j];
+              j += 1;
+            }
+            if (digits) {
+              const index = Number(digits);
+              const value = index > 0 && groups[index - 1] !== undefined ? groups[index - 1] : "";
+              result += value;
+              i += digits.length;
+              continue;
+            }
+          }
+        }
+        result += char;
+      }
+      return result;
+    }
+
+    replaceCurrentMatch() {
+      const search = this.search;
+      if (!search || !search.isOpen) return;
+      if (search.matches.length === 0 || search.activeIndex === -1) return;
+      if (search.regexError) return;
+      const match = search.matches[search.activeIndex];
+      const line = this.state.lines[match.lineIndex];
+      if (!line) return;
+
+      this.saveHistory();
+      const originalText = line.text;
+      const before = originalText.slice(0, match.start);
+      const after = originalText.slice(match.end);
+      const replaceValue = search.replaceInput.value ?? "";
+      const replacement = this.applyReplacementPattern(
+        match,
+        replaceValue,
+        originalText,
+        search.regexCheckbox.checked
+      );
+
+      line.text = before + replacement + after;
+      this.markDocumentVersion();
+      this.invalidateLayout();
+
+      const preferredIndex = Math.min(search.activeIndex, search.matches.length - 1);
+      this.updateSearchResults({ preserveActive: false, preferredIndex });
+    }
+
+    replaceAllMatches() {
+      const search = this.search;
+      if (!search || !search.isOpen) return;
+      if (search.matches.length === 0 || search.regexError) return;
+
+      this.saveHistory();
+      const replaceValue = search.replaceInput.value ?? "";
+      const useRegex = search.regexCheckbox.checked;
+      const matchesByLine = new Map();
+      search.matches.forEach((match) => {
+        if (!matchesByLine.has(match.lineIndex)) {
+          matchesByLine.set(match.lineIndex, []);
+        }
+        matchesByLine.get(match.lineIndex).push(match);
+      });
+
+      matchesByLine.forEach((lineMatches, lineIndex) => {
+        const line = this.state.lines[lineIndex];
+        if (!line) return;
+        const originalText = line.text;
+        const sorted = [...lineMatches].sort((a, b) => a.start - b.start);
+        let cursor = 0;
+        let result = "";
+        sorted.forEach((match) => {
+          result += originalText.slice(cursor, match.start);
+          const replacement = this.applyReplacementPattern(
+            match,
+            replaceValue,
+            originalText,
+            useRegex
+          );
+          result += replacement;
+          cursor = match.end;
+        });
+        result += originalText.slice(cursor);
+        line.text = result;
+      });
+
+      this.markDocumentVersion();
+      this.invalidateLayout();
+      this.updateSearchResults({ preserveActive: false });
+    }
     renderLoop(timestamp) {
+      if (
+        this.search &&
+        this.search.isOpen &&
+        (this.search.needsUpdate ||
+          this.search.lastEvaluatedVersion !== this.documentVersion)
+      ) {
+        this.updateSearchResults({ preserveActive: true });
+      }
       this.updateCursorBlink(timestamp);
       this.render();
       this.updateTextareaPosition();
@@ -171,6 +868,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     renderLine(line, lineIndex, visibleIndex, y) {
       this.renderIndentBackground(line, y);
+      this.renderSearchHighlights(lineIndex, y);
       this.renderSelection(lineIndex, y);
       this.renderCollapseIcon(line, lineIndex, y);
       this.renderLineText(line, lineIndex, y);
@@ -188,6 +886,29 @@ document.addEventListener("DOMContentLoaded", () => {
           this.state.view.lineHeight
         );
       }
+    }
+
+    renderSearchHighlights(lineIndex, y) {
+      const search = this.search;
+      if (!search || !search.isOpen || search.matchesByLine.size === 0) return;
+      const lineMatches = search.matchesByLine.get(lineIndex);
+      if (!lineMatches || lineMatches.length === 0) return;
+      const line = this.state.lines[lineIndex];
+      if (!line) return;
+      const indentWidth = this.state.view.indentWidth;
+      const indentX = this.config.padding + line.indent * indentWidth;
+      const lineHeight = this.state.view.lineHeight;
+      const text = line.text;
+      lineMatches.forEach((entry) => {
+        const startX = indentX + this.measureText(text.slice(0, entry.start));
+        const endX = indentX + this.measureText(text.slice(0, entry.end));
+        const width = Math.max(2, endX - startX);
+        const isActive = entry.index === search.activeIndex;
+        this.ctx.fillStyle = isActive
+          ? this.config.colors.searchActiveMatch
+          : this.config.colors.searchMatch;
+        this.ctx.fillRect(startX, y, width, lineHeight);
+      });
     }
 
     renderSelection(lineIndex, y) {
@@ -481,6 +1202,12 @@ document.addEventListener("DOMContentLoaded", () => {
       const alt = e.altKey;
       const key = e.key;
 
+      if (key === "Escape" && this.search && this.search.isOpen) {
+        e.preventDefault();
+        this.closeSearchPanel();
+        return;
+      }
+
       if (ctrl && this.handleCtrlShortcuts(e, key, shift)) {
         return;
       }
@@ -661,6 +1388,10 @@ document.addEventListener("DOMContentLoaded", () => {
             includeChildren: false,
           });
           return true;
+        case "f":
+          e.preventDefault();
+          this.openSearchPanel({ prefillSelection: true });
+          return true;
         case "x":
         case "c":
         case "v":
@@ -705,6 +1436,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
       if (parts.length === 1) {
         line.text = head + text + tail;
+        this.markDocumentVersion();
         this.setCursor(cursor.lineIndex, cursor.charIndex + text.length);
         return;
       }
@@ -720,6 +1452,7 @@ document.addEventListener("DOMContentLoaded", () => {
         this.state.lines.splice(insertIndex, 0, newLine);
         insertIndex += 1;
       }
+      this.markDocumentVersion();
       this.setCursor(insertIndex - 1, parts[parts.length - 1].length);
       this.invalidateLayout();
     }
@@ -739,6 +1472,7 @@ document.addEventListener("DOMContentLoaded", () => {
         typeof indent === "number" ? indent : line.indent;
       const newLine = this.createLine(tail, newIndent, false);
       this.state.lines.splice(cursor.lineIndex + 1, 0, newLine);
+      this.markDocumentVersion();
       this.setCursor(cursor.lineIndex + 1, 0);
       this.invalidateLayout();
     }
@@ -754,6 +1488,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const head = line.text.slice(0, cursor.charIndex);
         const tail = line.text.slice(cursor.charIndex);
         line.text = `${head}[${extracted}]${tail}`;
+        this.markDocumentVersion();
         this.setCursor(cursor.lineIndex, cursor.charIndex + extracted.length + 2);
       } else {
         const cursor = this.state.cursor;
@@ -761,6 +1496,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const head = line.text.slice(0, cursor.charIndex);
         const tail = line.text.slice(cursor.charIndex);
         line.text = `${head}[]${tail}`;
+        this.markDocumentVersion();
         this.setCursor(cursor.lineIndex, cursor.charIndex + 1);
       }
     }
@@ -774,6 +1510,7 @@ document.addEventListener("DOMContentLoaded", () => {
         line.text =
           line.text.slice(0, cursor.charIndex - 1) +
           line.text.slice(cursor.charIndex);
+        this.markDocumentVersion();
         this.setCursor(cursor.lineIndex, cursor.charIndex - 1);
         return;
       }
@@ -789,6 +1526,7 @@ document.addEventListener("DOMContentLoaded", () => {
       prevLine.text += line.text;
       const blockLength = this.getDescendantEnd(cursor.lineIndex) - cursor.lineIndex;
       this.state.lines.splice(cursor.lineIndex, blockLength);
+      this.markDocumentVersion();
       this.setCursor(prevLineIndex, prevLength);
       this.invalidateLayout();
     }
@@ -802,6 +1540,7 @@ document.addEventListener("DOMContentLoaded", () => {
         line.text =
           line.text.slice(0, cursor.charIndex) +
           line.text.slice(cursor.charIndex + 1);
+        this.markDocumentVersion();
         return;
       }
       if (cursor.lineIndex >= this.state.lines.length - 1) return;
@@ -814,6 +1553,7 @@ document.addEventListener("DOMContentLoaded", () => {
       line.text += nextLine.text;
       const blockLength = this.getDescendantEnd(nextLineIndex) - nextLineIndex;
       this.state.lines.splice(nextLineIndex, blockLength);
+      this.markDocumentVersion();
       this.invalidateLayout();
     }
 
@@ -841,6 +1581,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const removeCount = end.lineIndex - start.lineIndex;
         this.state.lines.splice(start.lineIndex + 1, removeCount);
       }
+      this.markDocumentVersion();
       this.setCursor(start.lineIndex, start.charIndex);
       this.state.selection = null;
       this.selectionAnchor = null;
@@ -1080,6 +1821,7 @@ document.addEventListener("DOMContentLoaded", () => {
           line.indent = Math.max(0, line.indent + delta);
         }
       }
+      this.markDocumentVersion();
       this.invalidateLayout();
     }
 
@@ -1177,6 +1919,7 @@ document.addEventListener("DOMContentLoaded", () => {
         };
       }
 
+      this.markDocumentVersion();
       this.invalidateLayout();
     }
 
@@ -1208,6 +1951,7 @@ document.addEventListener("DOMContentLoaded", () => {
         this.state.lines.splice(insertIndex, 0, ...block);
         this.setCursor(insertIndex, this.state.cursor.charIndex);
       }
+      this.markDocumentVersion();
       this.invalidateLayout();
     }
     setCursor(lineIndex, charIndex, options = {}) {
@@ -1527,6 +2271,7 @@ document.addEventListener("DOMContentLoaded", () => {
       this.state.view.scrollTop = snapshot.scrollTop;
       this.invalidateLayout();
       this.resetCursorBlink();
+      this.markDocumentVersion();
     }
 
     undo() {
@@ -1543,6 +2288,13 @@ document.addEventListener("DOMContentLoaded", () => {
       const snapshot = this.state.history.redoStack.pop();
       this.state.history.undoStack.push(current);
       this.applySnapshot(snapshot);
+    }
+
+    markDocumentVersion() {
+      this.documentVersion += 1;
+      if (this.search) {
+        this.search.needsUpdate = true;
+      }
     }
 
     measureText(text) {
