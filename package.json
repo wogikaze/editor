@@ -1,0 +1,7 @@
+{
+  "name": "wgkz-editor",
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

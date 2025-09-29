@@ -48,6 +48,7 @@ class CanvasEditor extends CanvasRenderer {
 
     this.documentVersion = 0;
     this.searchController = new SearchController(this);
+    this.skipNextInputCommit = false;
 
     this.handleWindowResize = this.handleWindowResize.bind(this);
 
@@ -152,7 +153,10 @@ class CanvasEditor extends CanvasRenderer {
         this.isComposing = false;
         this.compositionText = "";
         if (e.data) {
-          this.insertText(e.data);
+          const handled = this.processCommittedText(e.data);
+          this.skipNextInputCommit = handled;
+        } else {
+          this.skipNextInputCommit = false;
         }
         this.textarea.value = "";
       });
@@ -376,11 +380,42 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     onInput(e) {
-      if (this.isComposing) return;
+      if (e.isComposing) return;
       const value = e.target.value;
       if (!value) return;
-      this.insertText(value.replace(/\r\n/g, "\n"));
-      this.textarea.value = "";
+      e.target.value = "";
+      if (this.skipNextInputCommit) {
+        this.skipNextInputCommit = false;
+        return;
+      }
+      this.processCommittedText(value);
+    }
+
+    processCommittedText(text) {
+      if (!text) return false;
+      const normalized = text.replace(/\r\n/g, "\n");
+      if (this.handleLeadingSpaceIndentInput(normalized)) {
+        return true;
+      }
+      this.insertText(normalized);
+      return true;
+    }
+
+    handleLeadingSpaceIndentInput(text) {
+      if (!text) return false;
+      const segments = text.split("\n");
+      const first = segments[0];
+      const hasExtraContent = segments.slice(1).some((segment) => segment.length > 0);
+      if (!first || !/^[ \u3000]+$/.test(first)) return false;
+      if (hasExtraContent) return false;
+      if (this.state.cursor.charIndex !== 0) return false;
+      const count = Array.from(first).length;
+      if (count === 0) return false;
+      this.changeIndent(count, {
+        applyToSelection: this.hasSelection(),
+        includeChildren: false,
+      });
+      return true;
     }
 
     onKeydown(e) {
