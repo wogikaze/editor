@@ -328,13 +328,13 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     renderCursor() {
       if (!this.isFocused || this.isComposing) return;
-      const { x, cursorTop, line } = this.getCursorCoords();
+      const { x, worldCursorTop, line } = this.getCursorCoords();
       if (!line) return;
       if (this.cursorBlinkState) {
         this.ctx.fillStyle = this.config.colors.cursor;
         this.ctx.fillRect(
           x,
-          cursorTop,
+          worldCursorTop,
           2,
           Math.max(2, this.typography.cursorHeight)
         );
@@ -342,15 +342,15 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     renderCompositionText() {
-      const { x, cursorTop, baseline } = this.getCursorCoords();
+      const { x, worldCursorTop, worldBaseline } = this.getCursorCoords();
       const glyphHeight = Math.max(2, this.typography.cursorHeight);
       this.ctx.fillStyle = this.config.colors.text;
-      this.ctx.fillText(this.compositionText, x, baseline);
+      this.ctx.fillText(this.compositionText, x, worldBaseline);
       const width = this.measureText(this.compositionText);
       this.ctx.strokeStyle = this.config.colors.imeUnderline;
       this.ctx.lineWidth = 1;
       this.ctx.beginPath();
-      const underlineY = cursorTop + glyphHeight + Math.max(0, this.typography.paddingBottom - 2);
+      const underlineY = worldCursorTop + glyphHeight + Math.max(0, this.typography.paddingBottom - 2);
       this.ctx.moveTo(x, underlineY);
       this.ctx.lineTo(x + width, underlineY);
       this.ctx.stroke();
@@ -1292,7 +1292,15 @@ document.addEventListener("DOMContentLoaded", () => {
       const lineIndex = this.state.cursor.lineIndex;
       const visibleIndex = this.getVisibleIndex(lineIndex);
       if (visibleIndex === -1) {
-        return { x: 0, y: 0, line: null };
+        return {
+          x: 0,
+          worldLineTop: 0,
+          screenLineTop: 0,
+          worldCursorTop: 0,
+          screenCursorTop: 0,
+          worldBaseline: 0,
+          line: null,
+        };
       }
       const line = this.state.lines[lineIndex];
       const textBefore = line.text.slice(0, this.state.cursor.charIndex);
@@ -1300,18 +1308,28 @@ document.addEventListener("DOMContentLoaded", () => {
         this.config.padding + line.indent * this.state.view.indentWidth;
       const x =
         indentX + this.measureText(textBefore);
-      const lineTop =
-        this.config.padding + visibleIndex * this.state.view.lineHeight - this.state.view.scrollTop;
-      const cursorTop = lineTop + this.typography.paddingTop;
-      const baseline = lineTop + this.typography.baselineOffset;
-      return { x, y: lineTop, cursorTop, baseline, line };
+      const worldLineTop =
+        this.config.padding + visibleIndex * this.state.view.lineHeight;
+      const worldCursorTop = worldLineTop + this.typography.paddingTop;
+      const worldBaseline = worldLineTop + this.typography.baselineOffset;
+      const screenLineTop = worldLineTop - this.state.view.scrollTop;
+      const screenCursorTop = worldCursorTop - this.state.view.scrollTop;
+      return {
+        x,
+        worldLineTop,
+        screenLineTop,
+        worldCursorTop,
+        screenCursorTop,
+        worldBaseline,
+        line,
+      };
     }
 
     updateTextareaPosition() {
       if (!this.isFocused) return;
-      const { x, cursorTop } = this.getCursorCoords();
+      const { x, screenCursorTop } = this.getCursorCoords();
       this.textarea.style.left = `${x}px`;
-      this.textarea.style.top = `${cursorTop}px`;
+      this.textarea.style.top = `${screenCursorTop}px`;
     }
 
     ensureCursorVisibleWhileDragging(mouseY) {
