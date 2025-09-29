@@ -4,6 +4,7 @@ document.addEventListener("DOMContentLoaded", () => {
       this.canvas = canvas;
       this.textarea = textarea;
       this.ctx = canvas.getContext("2d");
+      this.container = canvas ? canvas.parentElement : null;
 
       this.config = {
         padding: 12,
@@ -47,6 +48,9 @@ document.addEventListener("DOMContentLoaded", () => {
       this.draggedDuringClick = false;
 
       this.documentVersion = 0;
+      this.pendingSearchLayoutUpdate = null;
+
+      this.handleWindowResize = this.handleWindowResize.bind(this);
 
       this.init();
     }
@@ -110,6 +114,7 @@ document.addEventListener("DOMContentLoaded", () => {
       this.canvas.addEventListener("wheel", this.onWheel.bind(this), {
         passive: false,
       });
+      window.addEventListener("resize", this.handleWindowResize);
       document.addEventListener("click", (e) => {
         if (e.target !== this.canvas && e.target !== this.textarea) {
           this.blur();
@@ -270,6 +275,7 @@ document.addEventListener("DOMContentLoaded", () => {
       } else {
         search.replaceRow.classList.add("hidden");
       }
+      this.scheduleSearchPanelLayoutUpdate();
     }
 
     updateSearchUIState() {
@@ -394,6 +400,7 @@ document.addEventListener("DOMContentLoaded", () => {
       search.isOpen = true;
       search.needsUpdate = true;
       this.updateSearchResults({ preserveActive: false });
+      this.scheduleSearchPanelLayoutUpdate();
       setTimeout(() => {
         search.queryInput.focus();
         search.queryInput.select();
@@ -408,6 +415,7 @@ document.addEventListener("DOMContentLoaded", () => {
       search.panel.setAttribute("aria-hidden", "true");
       search.selectionScope = null;
       this.clearSearchMatches();
+      this.updateSearchPanelLayout();
       this.focus();
     }
 
@@ -421,6 +429,35 @@ document.addEventListener("DOMContentLoaded", () => {
         target.focus();
         target.select();
       }, 0);
+    }
+
+    handleWindowResize() {
+      this.scheduleSearchPanelLayoutUpdate();
+    }
+
+    scheduleSearchPanelLayoutUpdate() {
+      if (this.pendingSearchLayoutUpdate !== null) {
+        cancelAnimationFrame(this.pendingSearchLayoutUpdate);
+      }
+      this.pendingSearchLayoutUpdate = requestAnimationFrame(() => {
+        this.pendingSearchLayoutUpdate = null;
+        this.updateSearchPanelLayout();
+      });
+    }
+
+    updateSearchPanelLayout() {
+      if (!this.container) return;
+      const search = this.search;
+      if (!search || !search.isOpen || search.panel.classList.contains("hidden")) {
+        this.container.classList.remove("search-visible");
+        this.container.style.removeProperty("--search-panel-offset");
+        return;
+      }
+      const panelHeight = search.panel.offsetHeight;
+      const verticalSpacing = 24;
+      const offset = Math.max(panelHeight + verticalSpacing, verticalSpacing);
+      this.container.style.setProperty("--search-panel-offset", `${offset}px`);
+      this.container.classList.add("search-visible");
     }
 
     captureSelectionScope() {

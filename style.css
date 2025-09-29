@@ -27,6 +27,12 @@ p {
   border: 1px solid #444;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   overflow: hidden;
+  --search-panel-offset: 0px;
+  padding: 0;
+}
+
+#editor-container.search-visible {
+  padding-top: var(--search-panel-offset);
 }
 
 canvas {
