@@ -64,6 +64,7 @@ document.addEventListener("DOMContentLoaded", () => {
         history: { undoStack: [], redoStack: [] },
         view: {
           scrollTop: 0,
+          scrollLeft: 0,
           font: '22px "Space Mono", "Noto Sans JP", monospace',
           lineHeight: 30,
           indentWidth: 24,
@@ -198,7 +199,10 @@ document.addEventListener("DOMContentLoaded", () => {
       this.ctx.fillStyle = this.config.colors.background;
       this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
       this.ctx.save();
-      this.ctx.translate(0, -this.state.view.scrollTop);
+      this.ctx.translate(
+        -this.state.view.scrollLeft,
+        -this.state.view.scrollTop
+      );
 
       this.lineLayouts.clear();
 
@@ -491,7 +495,7 @@ document.addEventListener("DOMContentLoaded", () => {
           end: { ...this.state.cursor },
         };
       }
-      this.ensureCursorVisibleWhileDragging(e.offsetY);
+      this.ensureCursorVisibleWhileDragging(e.offsetX, e.offsetY);
     }
 
     onMouseUp() {
@@ -522,9 +526,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
     onWheel(e) {
       e.preventDefault();
-      const maxScroll = this.getMaxScroll();
-      const next = this.state.view.scrollTop + e.deltaY;
-      this.state.view.scrollTop = Math.max(0, Math.min(maxScroll, next));
+      const maxScrollY = this.getMaxScroll();
+      const nextY = this.state.view.scrollTop + e.deltaY;
+      this.state.view.scrollTop = Math.max(0, Math.min(maxScrollY, nextY));
+
+      const maxScrollX = this.getMaxHorizontalScroll();
+      const nextX = this.state.view.scrollLeft + e.deltaX;
+      this.state.view.scrollLeft = Math.max(0, Math.min(maxScrollX, nextX));
     }
 
     onInput(e) {
@@ -1294,6 +1302,8 @@ document.addEventListener("DOMContentLoaded", () => {
       if (visibleIndex === -1) {
         return {
           x: 0,
+          worldX: 0,
+          screenX: 0,
           worldLineTop: 0,
           screenLineTop: 0,
           worldCursorTop: 0,
@@ -1306,16 +1316,19 @@ document.addEventListener("DOMContentLoaded", () => {
       const textBefore = line.text.slice(0, this.state.cursor.charIndex);
       const indentX =
         this.config.padding + line.indent * this.state.view.indentWidth;
-      const x =
+      const worldX =
         indentX + this.measureText(textBefore);
       const worldLineTop =
         this.config.padding + visibleIndex * this.state.view.lineHeight;
       const worldCursorTop = worldLineTop + this.typography.paddingTop;
       const worldBaseline = worldLineTop + this.typography.baselineOffset;
+      const screenX = worldX - this.state.view.scrollLeft;
       const screenLineTop = worldLineTop - this.state.view.scrollTop;
       const screenCursorTop = worldCursorTop - this.state.view.scrollTop;
       return {
-        x,
+        x: worldX,
+        worldX,
+        screenX,
         worldLineTop,
         screenLineTop,
         worldCursorTop,
@@ -1327,12 +1340,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
     updateTextareaPosition() {
       if (!this.isFocused) return;
-      const { x, screenCursorTop } = this.getCursorCoords();
-      this.textarea.style.left = `${x}px`;
+      const { screenX, screenCursorTop } = this.getCursorCoords();
+      this.textarea.style.left = `${screenX}px`;
       this.textarea.style.top = `${screenCursorTop}px`;
     }
 
-    ensureCursorVisibleWhileDragging(mouseY) {
+    ensureCursorVisibleWhileDragging(mouseX, mouseY) {
       const threshold = 20;
       if (mouseY < threshold) {
         this.state.view.scrollTop = Math.max(
@@ -1343,6 +1356,18 @@ document.addEventListener("DOMContentLoaded", () => {
         this.state.view.scrollTop = Math.min(
           this.getMaxScroll(),
           this.state.view.scrollTop + this.state.view.lineHeight
+        );
+      }
+
+      if (mouseX < threshold) {
+        this.state.view.scrollLeft = Math.max(
+          0,
+          this.state.view.scrollLeft - this.state.view.indentWidth
+        );
+      } else if (mouseX > this.canvas.width - threshold) {
+        this.state.view.scrollLeft = Math.min(
+          this.getMaxHorizontalScroll(),
+          this.state.view.scrollLeft + this.state.view.indentWidth
         );
       }
     }
@@ -1390,6 +1415,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     hitTest(offsetX, offsetY) {
+      const x = offsetX + this.state.view.scrollLeft;
       const y = offsetY + this.state.view.scrollTop;
       const lineHeight = this.state.view.lineHeight;
       const visibleLines = this.getVisibleLines();
@@ -1405,10 +1431,10 @@ document.addEventListener("DOMContentLoaded", () => {
       const indentX =
         this.config.padding + line.indent * indentWidth;
       const iconAreaEnd = indentX - indentWidth * 0.2;
-      if (offsetX < iconAreaEnd && this.hasChildren(lineIndex)) {
+      if (x < iconAreaEnd && this.hasChildren(lineIndex)) {
         return { lineIndex, charIndex: 0, clickedIcon: true };
       }
-      const relativeX = Math.max(0, offsetX - indentX);
+      const relativeX = Math.max(0, x - indentX);
       const charIndex = this.getCharIndexForX(line.text, relativeX);
       return { lineIndex, charIndex, clickedIcon: false };
     }
@@ -1430,8 +1456,9 @@ document.addEventListener("DOMContentLoaded", () => {
     openLinkAt(lineIndex, offsetX) {
       const segments = this.lineLayouts.get(lineIndex);
       if (!segments || segments.length === 0) return false;
+      const worldX = offsetX + this.state.view.scrollLeft;
       const targetSegment = segments.find(
-        (segment) => offsetX >= segment.startX && offsetX <= segment.endX
+        (segment) => worldX >= segment.startX && worldX <= segment.endX
       );
       if (!targetSegment || !targetSegment.target) return false;
       const target = targetSegment.target.trim();
@@ -1534,11 +1561,30 @@ document.addEventListener("DOMContentLoaded", () => {
       return Math.max(0, totalHeight - this.canvas.height);
     }
 
+    getMaxHorizontalScroll() {
+      const visibleLines = this.getVisibleLines();
+      const indentWidth = this.state.view.indentWidth;
+      let maxX = 0;
+      for (let i = 0; i < visibleLines.length; i += 1) {
+        const index = visibleLines[i];
+        const line = this.state.lines[index];
+        if (!line) continue;
+        const indentX =
+          this.config.padding + line.indent * indentWidth;
+        const lineWidth = indentX + this.measureText(line.text);
+        if (lineWidth > maxX) {
+          maxX = lineWidth;
+        }
+      }
+      const contentWidth = maxX + this.config.padding;
+      return Math.max(0, contentWidth - this.canvas.width);
+    }
+
     scrollToCursor() {
       const visibleIndex = this.getVisibleIndex(this.state.cursor.lineIndex);
       if (visibleIndex === -1) return;
-      const lineTop =
-        this.config.padding + visibleIndex * this.state.view.lineHeight;
+      const coords = this.getCursorCoords();
+      const lineTop = coords.worldLineTop;
       const lineBottom = lineTop + this.state.view.lineHeight;
       const viewTop = this.state.view.scrollTop;
       const viewBottom = viewTop + this.canvas.height;
@@ -1551,6 +1597,24 @@ document.addEventListener("DOMContentLoaded", () => {
         this.state.view.scrollTop = Math.min(
           this.getMaxScroll(),
           lineBottom - this.canvas.height + this.config.padding
+        );
+      }
+
+      const viewLeft = this.state.view.scrollLeft;
+      const viewRight = viewLeft + this.canvas.width;
+      const caretWidth = Math.max(2, this.typography.spaceWidth);
+      const cursorLeft = coords.x;
+      const cursorRight = cursorLeft + caretWidth;
+      if (cursorLeft < viewLeft + this.config.padding) {
+        this.state.view.scrollLeft = Math.max(
+          0,
+          cursorLeft - this.config.padding
+        );
+      } else if (cursorRight > viewRight - this.config.padding) {
+        const maxScrollLeft = this.getMaxHorizontalScroll();
+        this.state.view.scrollLeft = Math.min(
+          maxScrollLeft,
+          cursorRight - this.canvas.width + this.config.padding
         );
       }
     }
@@ -1593,6 +1657,7 @@ document.addEventListener("DOMContentLoaded", () => {
           }
           : null,
         scrollTop: this.state.view.scrollTop,
+        scrollLeft: this.state.view.scrollLeft,
       };
     }
 
@@ -1606,6 +1671,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         : null;
       this.state.view.scrollTop = snapshot.scrollTop;
+      this.state.view.scrollLeft = snapshot.scrollLeft ?? this.state.view.scrollLeft;
       this.invalidateLayout();
       this.resetCursorBlink();
     }
