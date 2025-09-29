@@ -24,6 +24,9 @@ document.addEventListener("DOMContentLoaded", () => {
           searchMatch: "rgba(229, 192, 123, 0.35)",
           searchActiveMatch: "rgba(229, 192, 123, 0.6)",
         },
+        search: {
+          regexTimeoutMs: 1500,
+        },
       };
 
       this.state = this.createInitialState();
@@ -534,6 +537,23 @@ document.addEventListener("DOMContentLoaded", () => {
       const startLine = scope ? scope.start.lineIndex : 0;
       const endLine = scope ? scope.end.lineIndex : lines.length - 1;
 
+      const timeoutMs = this.config.search?.regexTimeoutMs ?? 0;
+      const timeoutEnabled = Number.isFinite(timeoutMs) && timeoutMs > 0;
+      const now =
+        typeof performance !== "undefined" && typeof performance.now === "function"
+          ? () => performance.now()
+          : () => Date.now();
+      const deadline = timeoutEnabled ? now() + timeoutMs : null;
+      let timedOut = false;
+      const checkTimeout = () => {
+        if (!timeoutEnabled) return false;
+        if (now() > deadline) {
+          timedOut = true;
+          return true;
+        }
+        return false;
+      };
+
       if (useRegex) {
         let regex;
         try {
@@ -542,7 +562,7 @@ document.addEventListener("DOMContentLoaded", () => {
           return { matches: [], regexError: error.message };
         }
 
-        for (
+        lineLoop: for (
           let lineIndex = startLine;
           lineIndex <= endLine && lineIndex < lines.length;
           lineIndex += 1
@@ -580,11 +600,17 @@ document.addEventListener("DOMContentLoaded", () => {
               groupValues: match.length > 1 ? match.slice(1) : null,
               namedGroups: match.groups ? { ...match.groups } : null,
             });
+            if (checkTimeout()) {
+              break lineLoop;
+            }
+          }
+          if (checkTimeout()) {
+            break;
           }
         }
       } else {
         const needle = caseSensitive ? query : query.toLowerCase();
-        for (
+        lineLoop: for (
           let lineIndex = startLine;
           lineIndex <= endLine && lineIndex < lines.length;
           lineIndex += 1
@@ -616,8 +642,30 @@ document.addEventListener("DOMContentLoaded", () => {
             } else {
               index = haystack.indexOf(needle, index + needle.length);
             }
+            if (checkTimeout()) {
+              break lineLoop;
+            }
+          }
+          if (checkTimeout()) {
+            break;
           }
         }
+      }
+
+      if (timedOut) {
+        let formattedTimeout;
+        if (timeoutMs >= 1000) {
+          const seconds = timeoutMs / 1000;
+          formattedTimeout = Number.isInteger(seconds)
+            ? `${seconds}秒`
+            : `${seconds.toFixed(1)}秒`;
+        } else {
+          formattedTimeout = `${timeoutMs}ミリ秒`;
+        }
+        return {
+          matches: [],
+          regexError: `検索がタイムアウトしました (${formattedTimeout})`,
+        };
       }
 
       return { matches, regexError: null };
