@@ -4,6 +4,10 @@ export class CanvasRenderer {
     this.ctx = canvas.getContext("2d");
     this.textWidthCache = new Map();
     this.lineLayouts = new Map();
+    this.imageLayouts = new Map();
+    this.lineTops = new Map();
+    this.lineHeights = new Map();
+    this.imageLayoutsCache = new Map();
     this.typography = {
       spaceWidth: 0,
       ascent: 0,
@@ -89,19 +93,28 @@ export class CanvasRenderer {
     );
 
     this.lineLayouts.clear();
+    this.imageLayouts.clear();
+    this.lineTops.clear();
+    this.lineHeights.clear();
 
     const visibleLines = this.getVisibleLines();
-    const lineHeight = this.state.view.lineHeight;
-    visibleLines.forEach((lineIndex, visibleIndex) => {
+    let currentY = this.config.padding;
+    const viewportTop = this.state.view.scrollTop - this.config.padding;
+    const viewportBottom =
+      this.state.view.scrollTop + this.canvas.height + this.config.padding;
+
+    visibleLines.forEach((lineIndex) => {
       const line = this.state.lines[lineIndex];
-      const y = this.config.padding + visibleIndex * lineHeight;
-      if (
-        y + lineHeight < this.state.view.scrollTop - this.config.padding ||
-        y > this.state.view.scrollTop + this.canvas.height
-      ) {
-        return;
+      const lineHeight = this.getLineDisplayHeight(line);
+      const lineBottom = currentY + lineHeight;
+      this.lineTops.set(lineIndex, currentY);
+      this.lineHeights.set(lineIndex, lineHeight);
+
+      if (lineBottom >= viewportTop && currentY <= viewportBottom) {
+        this.renderLine(line, lineIndex, currentY, lineHeight);
       }
-      this.renderLine(line, lineIndex, visibleIndex, y);
+
+      currentY += lineHeight;
     });
 
     this.renderCursor();
@@ -113,15 +126,19 @@ export class CanvasRenderer {
     this.ctx.restore();
   }
 
-  renderLine(line, lineIndex, visibleIndex, y) {
-    this.renderIndentBackground(line, y);
-    this.renderSearchHighlights(lineIndex, y);
-    this.renderSelection(lineIndex, y);
-    this.renderCollapseIcon(line, lineIndex, y);
-    this.renderLineText(line, lineIndex, y);
+  renderLine(line, lineIndex, y, lineHeight) {
+    this.renderIndentBackground(line, y, lineHeight);
+    this.renderSearchHighlights(lineIndex, y, lineHeight);
+    this.renderSelection(lineIndex, y, lineHeight);
+    this.renderCollapseIcon(line, lineIndex, y, lineHeight);
+    if (this.isImageLine && this.isImageLine(line)) {
+      this.renderImageLine(line, lineIndex, y, lineHeight);
+    } else {
+      this.renderLineText(line, lineIndex, y);
+    }
   }
 
-  renderIndentBackground(line, y) {
+  renderIndentBackground(line, y, lineHeight) {
     const indentWidth = this.state.view.indentWidth;
     for (let level = 0; level < line.indent; level += 1) {
       const x = this.config.padding + level * indentWidth;
@@ -130,21 +147,21 @@ export class CanvasRenderer {
         x,
         y,
         Math.max(1, indentWidth - 4),
-        this.state.view.lineHeight
+        lineHeight
       );
     }
   }
 
-  renderSearchHighlights(lineIndex, y) {
+  renderSearchHighlights(lineIndex, y, lineHeight) {
     const search = this.search;
     if (!search || !search.isOpen || search.matchesByLine.size === 0) return;
     const lineMatches = search.matchesByLine.get(lineIndex);
     if (!lineMatches || lineMatches.length === 0) return;
     const line = this.state.lines[lineIndex];
+    if (this.isImageLine && this.isImageLine(line)) return;
     if (!line) return;
     const indentWidth = this.state.view.indentWidth;
     const indentX = this.config.padding + line.indent * indentWidth;
-    const lineHeight = this.state.view.lineHeight;
     const text = line.text;
     lineMatches.forEach((entry) => {
       const startX = indentX + this.measureText(text.slice(0, entry.start));
@@ -158,7 +175,7 @@ export class CanvasRenderer {
     });
   }
 
-  renderSelection(lineIndex, y) {
+  renderSelection(lineIndex, y, lineHeight) {
     const selection = this.getNormalizedSelection();
     if (!selection) return;
     const { start, end } = selection;
@@ -173,15 +190,26 @@ export class CanvasRenderer {
     const startIndex =
       lineIndex === start.lineIndex ? start.charIndex : 0;
     const endIndex =
-      lineIndex === end.lineIndex ? end.charIndex : line.text.length;
+      lineIndex === end.lineIndex ? end.charIndex : this.getLineLength(line);
 
-    if (startIndex === endIndex && startIndex === 0 && lineIndex !== end.lineIndex) {
-      selectionEndX = indentX + this.measureText(line.text);
+    if (this.isImageLine && this.isImageLine(line)) {
+      const imageWidth = line.image?.width ?? 0;
+      if (startIndex === 0 && endIndex === 1) {
+        selectionEndX = indentX + imageWidth;
+      } else if (startIndex === 1 && endIndex === 1) {
+        selectionStartX = indentX + imageWidth;
+        selectionEndX = selectionStartX;
+      }
     } else {
-      selectionStartX =
-        indentX + this.measureText(line.text.slice(0, startIndex));
-      selectionEndX =
-        indentX + this.measureText(line.text.slice(0, endIndex));
+      const text = line.text;
+      if (startIndex === endIndex && startIndex === 0 && lineIndex !== end.lineIndex) {
+        selectionEndX = indentX + this.measureText(text);
+      } else {
+        selectionStartX =
+          indentX + this.measureText(text.slice(0, startIndex));
+        selectionEndX =
+          indentX + this.measureText(text.slice(0, endIndex));
+      }
     }
 
     this.ctx.fillStyle = this.config.colors.selection;
@@ -189,11 +217,11 @@ export class CanvasRenderer {
       selectionStartX,
       y,
       Math.max(2, selectionEndX - selectionStartX),
-      this.state.view.lineHeight
+      lineHeight
     );
   }
 
-  renderCollapseIcon(line, lineIndex, y) {
+  renderCollapseIcon(line, lineIndex, y, lineHeight) {
     if (!this.hasChildren(lineIndex)) return;
     const indentWidth = this.state.view.indentWidth;
     const iconX =
@@ -238,6 +266,87 @@ export class CanvasRenderer {
     }
   }
 
+  renderImageLine(line, lineIndex, y, lineHeight) {
+    const indentWidth = this.state.view.indentWidth;
+    const indentX = this.config.padding + line.indent * indentWidth;
+    const imageData = line.image ?? {};
+    const width = imageData.width ?? this.state.view.lineHeight;
+    const height = imageData.height ?? lineHeight;
+    const imageTop = y;
+    const imageLeft = indentX;
+
+    const cacheEntry = this.getCachedImage(line);
+    if (cacheEntry?.status === "loaded" && cacheEntry.image) {
+      this.ctx.drawImage(cacheEntry.image, imageLeft, imageTop, width, height);
+    } else {
+      this.ctx.fillStyle = this.config.colors.selection;
+      this.ctx.fillRect(imageLeft, imageTop, Math.max(32, width || 64), Math.max(32, height || 64));
+      this.ctx.fillStyle = this.config.colors.background;
+      this.ctx.fillText("画像", imageLeft + 8, imageTop + this.typography.baselineOffset);
+    }
+
+    this.imageLayouts.set(lineIndex, {
+      x: imageLeft,
+      y: imageTop,
+      width,
+      height,
+    });
+
+    if (this.state && this.state.cursor && this.state.cursor.lineIndex === lineIndex && this.isFocused) {
+      this.ctx.save();
+      this.ctx.strokeStyle = this.config.colors.cursor;
+      this.ctx.lineWidth = 2;
+      this.ctx.strokeRect(imageLeft - 1, imageTop - 1, width + 2, height + 2);
+      const handleSize = 10;
+      const handleX = imageLeft + width;
+      const handleY = imageTop + height;
+      this.ctx.fillStyle = this.config.colors.cursor;
+      this.ctx.fillRect(handleX - handleSize / 2, handleY - handleSize / 2, handleSize, handleSize);
+      this.ctx.restore();
+    }
+  }
+
+  getCachedImage(line) {
+    if (!line || !line.image || !line.image.src) {
+      return null;
+    }
+    const key = line.id;
+    let entry = this.imageLayoutsCache?.get(key);
+    if (!entry) {
+      const image = new Image();
+      entry = { status: "loading", image };
+      if (!this.imageLayoutsCache) {
+        this.imageLayoutsCache = new Map();
+      }
+      this.imageLayoutsCache.set(key, entry);
+      image.onload = () => {
+        entry.status = "loaded";
+        entry.width = image.naturalWidth;
+        entry.height = image.naturalHeight;
+        if (line.image) {
+          if (!line.image.width) {
+            line.image.width = image.naturalWidth;
+          }
+          if (!line.image.height) {
+            line.image.height = image.naturalHeight;
+          }
+          if (!line.image.naturalWidth) {
+            line.image.naturalWidth = image.naturalWidth;
+          }
+          if (!line.image.naturalHeight) {
+            line.image.naturalHeight = image.naturalHeight;
+          }
+        }
+        this.invalidateLayout();
+      };
+      image.onerror = () => {
+        entry.status = "error";
+      };
+      image.src = line.image.src;
+    }
+    return entry;
+  }
+
   renderCursor() {
     if (!this.isFocused || this.isComposing) return;
     const { x, worldLineTop, line } = this.getCursorCoords();
@@ -248,7 +357,7 @@ export class CanvasRenderer {
         x,
         worldLineTop,
         2,
-        this.state.view.lineHeight
+        this.getLineDisplayHeight(line)
       );
     }
   }

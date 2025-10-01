@@ -57,6 +57,10 @@ class CanvasEditor extends CanvasRenderer {
     this.searchController = new SearchController(this);
     this.skipNextInputCommit = false;
 
+    this.activeImageResize = null;
+    this.isResizingImage = false;
+    this.currentCursorStyle = "";
+
     this.handleWindowResize = this.handleWindowResize.bind(this);
 
     this.init();
@@ -64,9 +68,21 @@ class CanvasEditor extends CanvasRenderer {
 
     createInitialState() {
       const lines = [
-        this.createLine("インデントが1の次に3になる場合もあります。", 0),
-        this.createLine("Shift + Tabでインデントを戻せます。", 1),
-        this.createLine("選択範囲の描画も丁寧に行います。", 3),
+        this.createLine({
+          type: "text",
+          text: "インデントが1の次に3になる場合もあります。",
+          indent: 0,
+        }),
+        this.createLine({
+          type: "text",
+          text: "Shift + Tabでインデントを戻せます。",
+          indent: 1,
+        }),
+        this.createLine({
+          type: "text",
+          text: "選択範囲の描画も丁寧に行います。",
+          indent: 3,
+        }),
       ];
       return {
         lines,
@@ -83,13 +99,203 @@ class CanvasEditor extends CanvasRenderer {
       };
     }
 
-    createLine(text, indent = 0, collapsed = false) {
-      return {
+    createLine(input, indent = 0, collapsed = false) {
+      const base = {
         id: CanvasEditor.generateId(),
-        text,
         indent,
         collapsed,
       };
+
+      if (typeof input === "object" && input !== null) {
+        const {
+          type = "text",
+          text = "",
+          image = null,
+          indent: customIndent,
+          collapsed: customCollapsed,
+        } = input;
+        const line = {
+          ...base,
+          indent: customIndent ?? indent,
+          collapsed: customCollapsed ?? collapsed,
+          type,
+          text: type === "text" ? `${text}` : "",
+        };
+        if (type === "image" && image) {
+          line.image = this.createImagePayload(image);
+        }
+        return line;
+      }
+
+      return {
+        ...base,
+        type: "text",
+        text: typeof input === "string" ? input : "",
+      };
+    }
+
+    createImagePayload(image) {
+      const {
+        src,
+        width,
+        height,
+        naturalWidth = width,
+        naturalHeight = height,
+        name = "",
+        mimeType = "",
+      } = image;
+      return {
+        src,
+        width,
+        height,
+        naturalWidth,
+        naturalHeight,
+        name,
+        mimeType,
+      };
+    }
+
+    isImageLine(line) {
+      return line && line.type === "image";
+    }
+
+    isTextLine(line) {
+      return line && line.type !== "image";
+    }
+
+    getLineLength(line) {
+      if (!line) return 0;
+      if (this.isImageLine(line)) {
+        return 1;
+      }
+      return line.text.length;
+    }
+
+    getLineContentWidth(line) {
+      if (!line) return 0;
+      if (this.isImageLine(line)) {
+        return line.image?.width ?? 0;
+      }
+      return this.measureText(line.text);
+    }
+
+    getLineDisplayHeight(line) {
+      if (!line) return this.state.view.lineHeight;
+      if (this.isImageLine(line)) {
+        const imageHeight = line.image?.height ?? this.state.view.lineHeight;
+        return Math.max(this.state.view.lineHeight, imageHeight);
+      }
+      return this.state.view.lineHeight;
+    }
+
+    cleanupImageCache() {
+      if (!this.imageLayoutsCache) return;
+      const validIds = new Set(this.state.lines.map((line) => line.id));
+      this.imageLayoutsCache.forEach((_, key) => {
+        if (!validIds.has(key)) {
+          this.imageLayoutsCache.delete(key);
+        }
+      });
+    }
+
+    setCanvasCursor(style) {
+      if (!this.canvas) return;
+      if (this.currentCursorStyle === style) return;
+      this.canvas.style.cursor = style;
+      this.currentCursorStyle = style;
+    }
+
+    findImageHandle(worldX, worldY) {
+      const lineIndex = this.state.cursor.lineIndex;
+      const layout = this.imageLayouts?.get(lineIndex);
+      if (!layout) return null;
+      const handleSize = 12;
+      const handleX = layout.x + layout.width;
+      const handleY = layout.y + layout.height;
+      if (
+        worldX >= handleX - handleSize &&
+        worldX <= handleX + handleSize &&
+        worldY >= handleY - handleSize &&
+        worldY <= handleY + handleSize
+      ) {
+        return {
+          lineIndex,
+          handle: "bottom-right",
+        };
+      }
+      return null;
+    }
+
+    startImageResize(target, worldX, worldY) {
+      if (!target) return;
+      const line = this.state.lines[target.lineIndex];
+      if (!line || !this.isImageLine(line)) return;
+      const layout = this.imageLayouts?.get(target.lineIndex);
+      const startWidth = line.image?.width ?? layout?.width ?? this.state.view.lineHeight;
+      const startHeight = line.image?.height ?? layout?.height ?? this.state.view.lineHeight;
+      this.saveHistory();
+      this.activeImageResize = {
+        lineIndex: target.lineIndex,
+        handle: target.handle,
+        startPointerX: worldX,
+        startPointerY: worldY,
+        startWidth,
+        startHeight,
+        aspectRatio:
+          startHeight > 0 ? startWidth / startHeight : 1,
+      };
+      this.isResizingImage = true;
+      this.setCanvasCursor("nwse-resize");
+    }
+
+    updateActiveImageResize(worldX, worldY) {
+      if (!this.activeImageResize) return;
+      const state = this.activeImageResize;
+      const line = this.state.lines[state.lineIndex];
+      if (!line || !this.isImageLine(line)) return;
+      const deltaX = worldX - state.startPointerX;
+      const deltaY = worldY - state.startPointerY;
+      const minSize = 24;
+      const maxSize = 4096;
+      const aspect = state.aspectRatio || 1;
+      let newWidth = state.startWidth;
+      let newHeight = state.startHeight;
+      if (Math.abs(deltaX) >= Math.abs(deltaY)) {
+        newWidth = clamp(state.startWidth + deltaX, minSize, maxSize);
+        newHeight = clamp(Math.round(newWidth / aspect), minSize, maxSize);
+      } else {
+        newHeight = clamp(state.startHeight + deltaY, minSize, maxSize);
+        newWidth = clamp(Math.round(newHeight * aspect), minSize, maxSize);
+      }
+      if (!line.image) return;
+      line.image.width = newWidth;
+      line.image.height = newHeight;
+      this.invalidateLayout();
+    }
+
+    finishImageResize() {
+      if (!this.activeImageResize) return;
+      this.isResizingImage = false;
+      this.activeImageResize = null;
+      this.markDocumentVersion();
+      this.setCanvasCursor(this.isFocused ? "text" : "default");
+    }
+
+    getWorldLineTop(targetLineIndex) {
+      if (this.lineTops && this.lineTops.has(targetLineIndex)) {
+        return this.lineTops.get(targetLineIndex);
+      }
+      let currentY = this.config.padding;
+      const visibleLines = this.getVisibleLines();
+      for (let i = 0; i < visibleLines.length; i += 1) {
+        const lineIndex = visibleLines[i];
+        if (lineIndex === targetLineIndex) {
+          return currentY;
+        }
+        const line = this.state.lines[lineIndex];
+        currentY += this.getLineDisplayHeight(line);
+      }
+      return currentY;
     }
     static generateId() {
       if (typeof crypto !== "undefined" && crypto.randomUUID) {
@@ -139,6 +345,8 @@ class CanvasEditor extends CanvasRenderer {
       this.canvas.addEventListener("wheel", this.onWheel.bind(this), {
         passive: false,
       });
+      this.canvas.addEventListener("dragover", this.onDragOver.bind(this));
+      this.canvas.addEventListener("drop", this.onDrop.bind(this));
       window.addEventListener("resize", this.handleWindowResize);
       document.addEventListener("click", (e) => {
         if (e.target !== this.canvas && e.target !== this.textarea) {
@@ -221,6 +429,9 @@ class CanvasEditor extends CanvasRenderer {
     getRenderedSegments(line, lineIndex) {
       const isActiveLine = lineIndex === this.state.cursor.lineIndex;
       const segments = [];
+      if (this.isImageLine(line)) {
+        return segments;
+      }
       const text = line.text;
       const trimmed = text.trimStart();
       const isQuote = trimmed.startsWith(">");
@@ -303,11 +514,13 @@ class CanvasEditor extends CanvasRenderer {
       this.isFocused = true;
       this.textarea.focus();
       this.resetCursorBlink();
+      this.setCanvasCursor("text");
     }
 
     blur() {
       this.isFocused = false;
       this.textarea.blur();
+      this.setCanvasCursor("default");
     }
 
     onMouseDown(e) {
@@ -315,6 +528,15 @@ class CanvasEditor extends CanvasRenderer {
       this.focus();
       this.draggedDuringClick = false;
       this.ignoreNextClick = false;
+      const worldX = e.offsetX + this.state.view.scrollLeft;
+      const worldY = e.offsetY + this.state.view.scrollTop;
+      const resizeTarget = this.findImageHandle(worldX, worldY);
+      if (resizeTarget) {
+        this.startImageResize(resizeTarget, worldX, worldY);
+        this.draggedDuringClick = true;
+        this.ignoreNextClick = true;
+        return;
+      }
       const { lineIndex, charIndex, clickedIcon } = this.hitTest(
         e.offsetX,
         e.offsetY
@@ -331,7 +553,25 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     onMouseMove(e) {
-      if (!this.isDragging) return;
+      const worldX = e.offsetX + this.state.view.scrollLeft;
+      const worldY = e.offsetY + this.state.view.scrollTop;
+
+      if (this.activeImageResize) {
+        e.preventDefault();
+        this.updateActiveImageResize(worldX, worldY);
+        return;
+      }
+
+      if (!this.isDragging) {
+        const handle = this.findImageHandle(worldX, worldY);
+        if (handle) {
+          this.setCanvasCursor("nwse-resize");
+        } else {
+          this.setCanvasCursor(this.isFocused ? "text" : "default");
+        }
+        return;
+      }
+
       e.preventDefault();
       this.draggedDuringClick = true;
       const hit = this.hitTest(e.offsetX, e.offsetY);
@@ -352,6 +592,9 @@ class CanvasEditor extends CanvasRenderer {
     onMouseUp() {
       this.isDragging = false;
       this.preferredCursorX = -1;
+      if (this.activeImageResize) {
+        this.finishImageResize();
+      }
     }
 
     onClick(e) {
@@ -550,10 +793,62 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     onPaste(e) {
-      e.preventDefault();
+      const items = Array.from(e.clipboardData?.items ?? []);
+      const imageItem = items.find((item) => item.type && item.type.startsWith("image/"));
+      if (imageItem) {
+        const file = imageItem.getAsFile();
+        if (file) {
+          e.preventDefault();
+          this.insertImageFromFile(file, { source: "clipboard" }).catch((error) => {
+            console.error("Failed to insert image from clipboard", error);
+          });
+          return;
+        }
+      }
+
       const paste = e.clipboardData.getData("text/plain");
       if (!paste) return;
+      e.preventDefault();
       this.insertText(normalizeNewlines(paste));
+    }
+
+    onDragOver(e) {
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = "copy";
+      }
+    }
+
+    onDrop(e) {
+      e.preventDefault();
+      const files = Array.from(e.dataTransfer?.files ?? []).filter((file) =>
+        file.type && file.type.startsWith("image/")
+      );
+      if (files.length === 0) return;
+      this.focus();
+      const rect = this.canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const hit = this.hitTest(x, y);
+      if (hit.lineIndex !== null) {
+        this.setCursor(hit.lineIndex, hit.charIndex);
+      } else if (this.state.lines.length > 0) {
+        const lastLineIndex = this.state.lines.length - 1;
+        this.setCursor(
+          lastLineIndex,
+          this.getLineLength(this.state.lines[lastLineIndex])
+        );
+      }
+
+      files
+        .reduce(
+          (promise, file) =>
+            promise.then(() => this.insertImageFromFile(file, { source: "drop" })),
+          Promise.resolve()
+        )
+        .catch((error) => {
+          console.error("Failed to insert dropped image", error);
+        });
     }
 
     insertText(text) {
@@ -564,6 +859,28 @@ class CanvasEditor extends CanvasRenderer {
       }
       const cursor = this.state.cursor;
       const line = this.state.lines[cursor.lineIndex];
+      if (this.isImageLine(line)) {
+        const indent = line.indent;
+        const parts = normalizeNewlines(text).split("\n");
+        const insertBeforeImage = cursor.charIndex === 0;
+        let insertIndex = insertBeforeImage
+          ? cursor.lineIndex
+          : cursor.lineIndex + 1;
+        parts.forEach((part) => {
+          const newLine = this.createLine({
+            type: "text",
+            text: part,
+            indent,
+          });
+          this.state.lines.splice(insertIndex, 0, newLine);
+          insertIndex += 1;
+        });
+        const lastPart = parts[parts.length - 1] ?? "";
+        this.markDocumentVersion();
+        this.setCursor(insertIndex - 1, lastPart.length);
+        this.invalidateLayout();
+        return;
+      }
       const tail = line.text.slice(cursor.charIndex);
       const head = line.text.slice(0, cursor.charIndex);
       const parts = text.split("\n");
@@ -591,6 +908,122 @@ class CanvasEditor extends CanvasRenderer {
       this.invalidateLayout();
     }
 
+    insertImageFromFile(file, options = {}) {
+      if (!file) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result;
+          if (typeof result !== "string") {
+            resolve();
+            return;
+          }
+          const image = new Image();
+          image.onload = () => {
+            this.insertImageLine(
+              {
+                src: result,
+                width: image.width,
+                height: image.height,
+                naturalWidth: image.naturalWidth || image.width,
+                naturalHeight: image.naturalHeight || image.height,
+                name: file.name,
+                mimeType: file.type,
+              },
+              options
+            );
+            resolve();
+          };
+          image.onerror = (error) => {
+            reject(error);
+          };
+          image.src = result;
+        };
+        reader.onerror = (error) => {
+          reject(error);
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    insertImageLine(imageData, options = {}) {
+      if (!imageData || !imageData.src) return;
+      if (this.state.lines.length === 0) {
+        const placeholder = this.createLine({ type: "text", text: "", indent: 0 });
+        this.state.lines.push(placeholder);
+        this.state.cursor = { lineIndex: 0, charIndex: 0 };
+      }
+
+      this.saveHistory();
+      if (this.state.selection) {
+        this.collapseSelectionWithoutHistory();
+      }
+
+      const cursor = this.state.cursor;
+      const currentLine = this.state.lines[cursor.lineIndex];
+      let insertIndex = cursor.lineIndex + 1;
+      let tailLine = null;
+      let targetIndent = currentLine ? currentLine.indent : 0;
+      let imageLine = null;
+
+      if (!currentLine) {
+        insertIndex = this.state.lines.length;
+      } else if (this.isTextLine(currentLine)) {
+        const head = currentLine.text.slice(0, cursor.charIndex);
+        const tail = currentLine.text.slice(cursor.charIndex);
+        if (head.length === 0 && tail.length === 0) {
+          imageLine = this.createLine({
+            type: "image",
+            indent: currentLine.indent,
+            image: imageData,
+          });
+          this.state.lines.splice(cursor.lineIndex, 1, imageLine);
+          this.markDocumentVersion();
+          this.setCursor(cursor.lineIndex, this.getLineLength(imageLine));
+          this.invalidateLayout();
+          return;
+        }
+        currentLine.text = head;
+        if (tail.length > 0) {
+          tailLine = this.createLine({
+            type: "text",
+            text: tail,
+            indent: currentLine.indent,
+          });
+        }
+        insertIndex = cursor.lineIndex + 1;
+      } else if (this.isImageLine(currentLine)) {
+        insertIndex = cursor.charIndex === 0
+          ? cursor.lineIndex
+          : cursor.lineIndex + 1;
+        targetIndent = currentLine.indent;
+      } else {
+        insertIndex = cursor.lineIndex + 1;
+      }
+
+      if (!imageLine) {
+        imageLine = this.createLine({
+          type: "image",
+          indent: targetIndent,
+          image: imageData,
+        });
+        this.state.lines.splice(insertIndex, 0, imageLine);
+      } else {
+        insertIndex = cursor.lineIndex;
+      }
+      if (tailLine) {
+        this.state.lines.splice(insertIndex + 1, 0, tailLine);
+      }
+
+      this.markDocumentVersion();
+      const nextCursorLine = tailLine ? insertIndex + 1 : insertIndex;
+      const nextCursorChar = tailLine ? 0 : this.getLineLength(imageLine);
+      this.setCursor(nextCursorLine, nextCursorChar);
+      this.invalidateLayout();
+    }
+
     insertLineBreak(options = {}) {
       const { indent } = options;
       this.saveHistory();
@@ -599,6 +1032,23 @@ class CanvasEditor extends CanvasRenderer {
       }
       const cursor = this.state.cursor;
       const line = this.state.lines[cursor.lineIndex];
+      if (this.isImageLine(line)) {
+        const newIndent =
+          typeof indent === "number" ? indent : line.indent;
+        const insertIndex = cursor.charIndex === 0
+          ? cursor.lineIndex
+          : cursor.lineIndex + 1;
+        const newLine = this.createLine({
+          type: "text",
+          text: "",
+          indent: newIndent,
+        });
+        this.state.lines.splice(insertIndex, 0, newLine);
+        this.markDocumentVersion();
+        this.setCursor(insertIndex, 0);
+        this.invalidateLayout();
+        return;
+      }
       const tail = line.text.slice(cursor.charIndex);
       const head = line.text.slice(0, cursor.charIndex);
       line.text = head;
@@ -618,6 +1068,9 @@ class CanvasEditor extends CanvasRenderer {
         const extracted = this.getSelectedText();
         this.collapseSelectionWithoutHistory();
         const line = this.state.lines[this.state.cursor.lineIndex];
+        if (this.isImageLine(line)) {
+          return;
+        }
         const cursor = this.state.cursor;
         const head = line.text.slice(0, cursor.charIndex);
         const tail = line.text.slice(cursor.charIndex);
@@ -627,6 +1080,9 @@ class CanvasEditor extends CanvasRenderer {
       } else {
         const cursor = this.state.cursor;
         const line = this.state.lines[cursor.lineIndex];
+        if (this.isImageLine(line)) {
+          return;
+        }
         const head = line.text.slice(0, cursor.charIndex);
         const tail = line.text.slice(cursor.charIndex);
         line.text = `${head}[]${tail}`;
@@ -639,6 +1095,24 @@ class CanvasEditor extends CanvasRenderer {
       if (this.deleteSelection()) return;
       const cursor = this.state.cursor;
       const line = this.state.lines[cursor.lineIndex];
+      if (this.isImageLine(line)) {
+        if (cursor.charIndex === 0 && line.indent > 0) {
+          this.changeIndent(-1);
+          return;
+        }
+        if (cursor.lineIndex === 0) {
+          return;
+        }
+        this.saveHistory();
+        this.state.lines.splice(cursor.lineIndex, 1);
+        this.markDocumentVersion();
+        const targetIndex = Math.max(0, cursor.lineIndex - 1);
+        const targetLine = this.state.lines[targetIndex];
+        const targetChar = this.getLineLength(targetLine);
+        this.setCursor(targetIndex, targetChar);
+        this.invalidateLayout();
+        return;
+      }
       if (cursor.charIndex > 0) {
         this.saveHistory();
         line.text =
@@ -648,6 +1122,18 @@ class CanvasEditor extends CanvasRenderer {
         this.setCursor(cursor.lineIndex, cursor.charIndex - 1);
         return;
       }
+      if (cursor.lineIndex > 0) {
+        const previousIndex = cursor.lineIndex - 1;
+        const previousLine = this.state.lines[previousIndex];
+        if (this.isImageLine(previousLine)) {
+          this.saveHistory();
+          this.state.lines.splice(previousIndex, 1);
+          this.markDocumentVersion();
+          this.setCursor(previousIndex, 0);
+          this.invalidateLayout();
+          return;
+        }
+      }
       if (line.indent > 0) {
         this.changeIndent(-1);
         return;
@@ -656,8 +1142,10 @@ class CanvasEditor extends CanvasRenderer {
       this.saveHistory();
       const prevLineIndex = cursor.lineIndex - 1;
       const prevLine = this.state.lines[prevLineIndex];
-      const prevLength = prevLine.text.length;
-      prevLine.text += line.text;
+      const prevLength = this.getLineLength(prevLine);
+      if (this.isTextLine(prevLine)) {
+        prevLine.text += line.text;
+      }
       const blockEnd = this.getDescendantEnd(cursor.lineIndex);
       const hasChildren = blockEnd > cursor.lineIndex + 1;
       this.state.lines.splice(cursor.lineIndex, hasChildren ? 1 : blockEnd - cursor.lineIndex);
@@ -670,6 +1158,26 @@ class CanvasEditor extends CanvasRenderer {
       if (this.deleteSelection()) return;
       const cursor = this.state.cursor;
       const line = this.state.lines[cursor.lineIndex];
+      if (this.isImageLine(line)) {
+        this.saveHistory();
+        this.state.lines.splice(cursor.lineIndex, 1);
+        this.markDocumentVersion();
+        const targetIndex = Math.min(cursor.lineIndex, this.state.lines.length - 1);
+        if (this.state.lines.length === 0) {
+          const newLine = this.createLine({ type: "text", text: "", indent: 0 });
+          this.state.lines.push(newLine);
+          this.setCursor(0, 0);
+        } else {
+          const targetLine = this.state.lines[targetIndex];
+          const targetChar = Math.min(
+            cursor.charIndex,
+            this.getLineLength(targetLine)
+          );
+          this.setCursor(targetIndex, targetChar);
+        }
+        this.invalidateLayout();
+        return;
+      }
       if (cursor.charIndex < line.text.length) {
         this.saveHistory();
         line.text =
@@ -682,6 +1190,12 @@ class CanvasEditor extends CanvasRenderer {
       this.saveHistory();
       const nextLineIndex = cursor.lineIndex + 1;
       const nextLine = this.state.lines[nextLineIndex];
+      if (this.isImageLine(nextLine)) {
+        this.state.lines.splice(nextLineIndex, 1);
+        this.markDocumentVersion();
+        this.invalidateLayout();
+        return;
+      }
       if (nextLine.indent > line.indent) {
         nextLine.indent = line.indent;
       }
@@ -727,7 +1241,7 @@ class CanvasEditor extends CanvasRenderer {
     selectAll() {
       if (this.state.lines.length === 0) return;
       const lastLineIndex = this.state.lines.length - 1;
-      const lastChar = this.state.lines[lastLineIndex].text.length;
+      const lastChar = this.getLineLength(this.state.lines[lastLineIndex]);
       this.state.selection = {
         start: { lineIndex: 0, charIndex: 0 },
         end: { lineIndex: lastLineIndex, charIndex: lastChar },
@@ -747,6 +1261,7 @@ class CanvasEditor extends CanvasRenderer {
 
       const cursor = this.state.cursor;
       const line = this.state.lines[cursor.lineIndex];
+      const lineLength = this.getLineLength(line);
       let newLineIndex = cursor.lineIndex;
       let newCharIndex = cursor.charIndex + direction;
 
@@ -756,12 +1271,12 @@ class CanvasEditor extends CanvasRenderer {
           newCharIndex = 0;
         } else {
           newLineIndex = prevVisible;
-          newCharIndex = this.state.lines[prevVisible].text.length;
+          newCharIndex = this.getLineLength(this.state.lines[prevVisible]);
         }
-      } else if (newCharIndex > line.text.length) {
+      } else if (newCharIndex > lineLength) {
         const nextVisible = this.getNextVisibleLine(cursor.lineIndex);
         if (nextVisible === null) {
-          newCharIndex = line.text.length;
+          newCharIndex = lineLength;
         } else {
           newLineIndex = nextVisible;
           newCharIndex = 0;
@@ -792,9 +1307,15 @@ class CanvasEditor extends CanvasRenderer {
 
       if (this.preferredCursorX < 0) {
         const line = this.getCurrentLine();
-        this.preferredCursorX = this.measureText(
-          line.text.slice(0, this.state.cursor.charIndex)
-        );
+        if (this.isImageLine(line)) {
+          const imageWidth = line.image?.width ?? 0;
+          this.preferredCursorX =
+            this.state.cursor.charIndex >= 1 ? imageWidth : 0;
+        } else {
+          this.preferredCursorX = this.measureText(
+            line.text.slice(0, this.state.cursor.charIndex)
+          );
+        }
       }
 
       const targetVisibleIndex = Math.max(
@@ -803,10 +1324,16 @@ class CanvasEditor extends CanvasRenderer {
       );
       const targetLineIndex = visibleLines[targetVisibleIndex];
       const targetLine = this.state.lines[targetLineIndex];
-      const targetCharIndex = this.getCharIndexForX(
-        targetLine.text,
-        this.preferredCursorX
-      );
+      let targetCharIndex;
+      if (this.isImageLine(targetLine)) {
+        const imageWidth = targetLine.image?.width ?? 0;
+        targetCharIndex = this.preferredCursorX > imageWidth / 2 ? 1 : 0;
+      } else {
+        targetCharIndex = this.getCharIndexForX(
+          targetLine.text,
+          this.preferredCursorX
+        );
+      }
 
       if (extendSelection) {
         this.ensureSelectionAnchor();
@@ -826,7 +1353,7 @@ class CanvasEditor extends CanvasRenderer {
       const targetChar =
         direction === "start"
           ? 0
-          : this.getCurrentLine().text.length;
+          : this.getLineLength(this.getCurrentLine());
       if (extendSelection) {
         this.ensureSelectionAnchor();
         this.setCursor(this.state.cursor.lineIndex, targetChar, {
@@ -847,7 +1374,7 @@ class CanvasEditor extends CanvasRenderer {
       const charIndex =
         direction === "start"
           ? 0
-          : this.state.lines[lineIndex].text.length;
+          : this.getLineLength(this.state.lines[lineIndex]);
       if (extendSelection) {
         this.ensureSelectionAnchor();
         this.setCursor(lineIndex, charIndex, { resetSelection: false });
@@ -866,12 +1393,47 @@ class CanvasEditor extends CanvasRenderer {
       let lineIndex = cursor.lineIndex;
       let charIndex = cursor.charIndex;
 
+      if (this.isImageLine(line)) {
+        if (direction < 0) {
+          if (charIndex > 0) {
+            charIndex = 0;
+          } else {
+            const prev = this.getPreviousVisibleLine(lineIndex);
+            if (prev === null) return;
+            lineIndex = prev;
+            charIndex = this.getLineLength(this.state.lines[prev]);
+          }
+        } else {
+          const lineLength = this.getLineLength(line);
+          if (charIndex < lineLength) {
+            charIndex = lineLength;
+          } else {
+            const next = this.getNextVisibleLine(lineIndex);
+            if (next === null) return;
+            lineIndex = next;
+            charIndex = 0;
+          }
+        }
+
+        if (extendSelection) {
+          this.ensureSelectionAnchor();
+          this.setCursor(lineIndex, charIndex, { resetSelection: false });
+          this.state.selection = {
+            start: { ...this.selectionAnchor },
+            end: { ...this.state.cursor },
+          };
+        } else {
+          this.setCursor(lineIndex, charIndex);
+        }
+        return;
+      }
+
       if (direction < 0) {
         if (charIndex === 0) {
           const prev = this.getPreviousVisibleLine(lineIndex);
           if (prev === null) return;
           lineIndex = prev;
-          charIndex = this.state.lines[prev].text.length;
+          charIndex = this.getLineLength(this.state.lines[prev]);
         }
         charIndex = this.findWordBoundary(
           this.state.lines[lineIndex].text,
@@ -879,7 +1441,8 @@ class CanvasEditor extends CanvasRenderer {
           -1
         );
       } else {
-        if (charIndex === line.text.length) {
+        const lineLength = this.getLineLength(line);
+        if (charIndex === lineLength) {
           const next = this.getNextVisibleLine(lineIndex);
           if (next === null) return;
           lineIndex = next;
@@ -955,7 +1518,10 @@ class CanvasEditor extends CanvasRenderer {
       if (line.collapsed && !this.isVisible(this.state.cursor.lineIndex)) {
         this.setCursor(
           lineIndex,
-          Math.min(this.state.cursor.charIndex, line.text.length)
+          Math.min(
+            this.state.cursor.charIndex,
+            this.getLineLength(line)
+          )
         );
       }
     }
@@ -1080,7 +1646,7 @@ class CanvasEditor extends CanvasRenderer {
       const maxLineIndex = Math.max(0, this.state.lines.length - 1);
       lineIndex = clamp(lineIndex, 0, maxLineIndex);
       const line = this.state.lines[lineIndex];
-      charIndex = clamp(charIndex, 0, line.text.length);
+      charIndex = clamp(charIndex, 0, this.getLineLength(line));
       this.state.cursor = { lineIndex, charIndex };
       if (resetSelection) {
         this.state.selection = null;
@@ -1110,15 +1676,27 @@ class CanvasEditor extends CanvasRenderer {
         };
       }
       const line = this.state.lines[lineIndex];
-      const textBefore = line.text.slice(0, this.state.cursor.charIndex);
       const indentX =
         this.config.padding + line.indent * this.state.view.indentWidth;
-      const worldX =
-        indentX + this.measureText(textBefore);
-      const worldLineTop =
-        this.config.padding + visibleIndex * this.state.view.lineHeight;
-      const worldCursorTop = worldLineTop + this.typography.paddingTop;
-      const worldBaseline = worldLineTop + this.typography.baselineOffset;
+      const cursorCharIndex = this.state.cursor.charIndex;
+      let relativeX = 0;
+      if (this.isImageLine(line)) {
+        const imageWidth = line.image?.width ?? 0;
+        relativeX = cursorCharIndex >= 1 ? imageWidth : 0;
+      } else {
+        const textBefore = line.text.slice(0, cursorCharIndex);
+        relativeX = this.measureText(textBefore);
+      }
+      const lineTop = this.getWorldLineTop(lineIndex);
+      const lineHeight = this.getLineDisplayHeight(line);
+      const worldX = indentX + relativeX;
+      const worldLineTop = lineTop;
+      const worldCursorTop = this.isImageLine(line)
+        ? worldLineTop
+        : worldLineTop + this.typography.paddingTop;
+      const worldBaseline = this.isImageLine(line)
+        ? Math.min(worldLineTop + lineHeight - 2, worldLineTop + this.typography.baselineOffset)
+        : worldLineTop + this.typography.baselineOffset;
       const screenX = worldX - this.state.view.scrollLeft;
       const screenLineTop = worldLineTop - this.state.view.scrollTop;
       const screenCursorTop = worldCursorTop - this.state.view.scrollTop;
@@ -1214,15 +1792,22 @@ class CanvasEditor extends CanvasRenderer {
     hitTest(offsetX, offsetY) {
       const x = offsetX + this.state.view.scrollLeft;
       const y = offsetY + this.state.view.scrollTop;
-      const lineHeight = this.state.view.lineHeight;
       const visibleLines = this.getVisibleLines();
-      const index = Math.floor(
-        (y - this.config.padding) / lineHeight
-      );
-      if (index < 0 || index >= visibleLines.length) {
+      let lineIndex = null;
+      for (let i = 0; i < visibleLines.length; i += 1) {
+        const candidateIndex = visibleLines[i];
+        const lineTop = this.lineTops?.get(candidateIndex) ?? this.getWorldLineTop(candidateIndex);
+        const lineHeight =
+          this.lineHeights?.get(candidateIndex) ??
+          this.getLineDisplayHeight(this.state.lines[candidateIndex]);
+        if (y >= lineTop && y <= lineTop + lineHeight) {
+          lineIndex = candidateIndex;
+          break;
+        }
+      }
+      if (lineIndex === null) {
         return { lineIndex: null, charIndex: null, clickedIcon: false };
       }
-      const lineIndex = visibleLines[index];
       const line = this.state.lines[lineIndex];
       const indentWidth = this.state.view.indentWidth;
       const indentX =
@@ -1232,7 +1817,13 @@ class CanvasEditor extends CanvasRenderer {
         return { lineIndex, charIndex: 0, clickedIcon: true };
       }
       const relativeX = Math.max(0, x - indentX);
-      const charIndex = this.getCharIndexForX(line.text, relativeX);
+      let charIndex;
+      if (this.isImageLine(line)) {
+        const imageWidth = line.image?.width ?? 0;
+        charIndex = relativeX > imageWidth / 2 ? 1 : 0;
+      } else {
+        charIndex = this.getCharIndexForX(line.text, relativeX);
+      }
       return { lineIndex, charIndex, clickedIcon: false };
     }
 
@@ -1352,9 +1943,13 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     getMaxScroll() {
-      const totalHeight =
-        this.getVisibleLines().length * this.state.view.lineHeight +
-        this.config.padding * 2;
+      const visibleLines = this.getVisibleLines();
+      let totalHeight = this.config.padding * 2;
+      visibleLines.forEach((lineIndex) => {
+        totalHeight += this.getLineDisplayHeight(
+          this.state.lines[lineIndex]
+        );
+      });
       return Math.max(0, totalHeight - this.canvas.height);
     }
 
@@ -1368,7 +1963,10 @@ class CanvasEditor extends CanvasRenderer {
         if (!line) continue;
         const indentX =
           this.config.padding + line.indent * indentWidth;
-        const lineWidth = indentX + this.measureText(line.text);
+        const contentWidth = this.isImageLine(line)
+          ? line.image?.width ?? this.state.view.lineHeight
+          : this.measureText(line.text);
+        const lineWidth = indentX + contentWidth;
         if (lineWidth > maxX) {
           maxX = lineWidth;
         }
@@ -1382,7 +1980,8 @@ class CanvasEditor extends CanvasRenderer {
       if (visibleIndex === -1) return;
       const coords = this.getCursorCoords();
       const lineTop = coords.worldLineTop;
-      const lineBottom = lineTop + this.state.view.lineHeight;
+      const lineHeight = this.getLineDisplayHeight(coords.line);
+      const lineBottom = lineTop + lineHeight;
       const viewTop = this.state.view.scrollTop;
       const viewBottom = viewTop + this.canvas.height;
       if (lineTop < viewTop + this.config.padding) {
@@ -1445,7 +2044,10 @@ class CanvasEditor extends CanvasRenderer {
 
     createStateSnapshot() {
       return {
-        lines: this.state.lines.map((line) => ({ ...line })),
+        lines: this.state.lines.map((line) => ({
+          ...line,
+          image: line.image ? { ...line.image } : undefined,
+        })),
         cursor: { ...this.state.cursor },
         selection: this.state.selection
           ? {
@@ -1459,7 +2061,10 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     applySnapshot(snapshot) {
-      this.state.lines = snapshot.lines.map((line) => ({ ...line }));
+      this.state.lines = snapshot.lines.map((line) => ({
+        ...line,
+        image: line.image ? { ...line.image } : undefined,
+      }));
       this.state.cursor = { ...snapshot.cursor };
       this.state.selection = snapshot.selection
         ? {
@@ -1472,6 +2077,7 @@ class CanvasEditor extends CanvasRenderer {
       this.invalidateLayout();
       this.resetCursorBlink();
       this.markDocumentVersion();
+      this.cleanupImageCache();
     }
 
     undo() {
@@ -1495,6 +2101,7 @@ class CanvasEditor extends CanvasRenderer {
       if (this.search) {
         this.search.needsUpdate = true;
       }
+      this.cleanupImageCache();
     }
   }
 
