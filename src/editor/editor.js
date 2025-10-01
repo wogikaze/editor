@@ -1238,12 +1238,24 @@ class CanvasEditor extends CanvasRenderer {
         this.invalidateLayout();
         return;
       }
-      if (nextLine.indent > line.indent) {
-        nextLine.indent = line.indent;
+      const blockEnd = this.getDescendantEnd(nextLineIndex);
+      const removed = this.state.lines.splice(
+        nextLineIndex,
+        blockEnd - nextLineIndex
+      );
+      const [, ...descendants] = removed;
+      if (this.isTextLine(line)) {
+        line.text += removed[0].text;
       }
-      line.text += nextLine.text;
-      const blockLength = this.getDescendantEnd(nextLineIndex) - nextLineIndex;
-      this.state.lines.splice(nextLineIndex, blockLength);
+      if (descendants.length > 0) {
+        const originalIndent = removed[0].indent;
+        const minimumChildIndent = line.indent + 1;
+        descendants.forEach((child) => {
+          const relative = Math.max(0, child.indent - originalIndent);
+          child.indent = Math.max(minimumChildIndent, minimumChildIndent + relative);
+        });
+        this.state.lines.splice(nextLineIndex, 0, ...descendants);
+      }
       this.markDocumentVersion();
       this.invalidateLayout();
     }
