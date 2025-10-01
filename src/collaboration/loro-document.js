@@ -133,6 +133,7 @@ export default class LoroDocument {
 
     const targetLines = snapshot.lines;
     const seen = new Set();
+    let mutated = false;
 
     for (let i = 0; i < targetLines.length; i += 1) {
       const line = targetLines[i];
@@ -146,12 +147,14 @@ export default class LoroDocument {
           index: i,
           map: this.lines.insertContainer(i, new LoroMap()),
         };
+        mutated = true;
       } else if (existing.index !== i) {
         this.lines.move(existing.index, i);
         existing = {
           index: i,
           map: this.lines.get(i),
         };
+        mutated = true;
       } else {
         existing.map = this.lines.get(i);
       }
@@ -162,10 +165,10 @@ export default class LoroDocument {
       }
 
       const id = requestedId || this._generateFallbackId();
-      this._setIfChanged(container, "id", id);
-      this._setIfChanged(container, "text", ensureString(line.text));
-      this._setIfChanged(container, "indent", ensureIndex(line.indent));
-      this._setIfChanged(container, "collapsed", ensureBoolean(line.collapsed));
+      mutated = this._setIfChanged(container, "id", id) || mutated;
+      mutated = this._setIfChanged(container, "text", ensureString(line.text)) || mutated;
+      mutated = this._setIfChanged(container, "indent", ensureIndex(line.indent)) || mutated;
+      mutated = this._setIfChanged(container, "collapsed", ensureBoolean(line.collapsed)) || mutated;
 
       seen.add(id);
     }
@@ -175,16 +178,27 @@ export default class LoroDocument {
       const entryId = entry && typeof entry.get === "function" ? ensureString(entry.get("id")) : null;
       if (!entryId || !seen.has(entryId)) {
         this.lines.delete(index, 1);
+        mutated = true;
       }
     }
 
-    this.version += 1;
     this._viewState = {
       cursor: clonePoint(snapshot.cursor),
       selection: cloneSelection(snapshot.selection),
       scrollTop: ensureNumber(snapshot.scrollTop),
       scrollLeft: ensureNumber(snapshot.scrollLeft),
     };
+
+    if (mutated) {
+      try {
+        if (typeof this.doc.commit === "function") {
+          this.doc.commit();
+        }
+      } catch (error) {
+        console.error("Failed to commit Loro changes", error);
+      }
+      this.version += 1;
+    }
   }
 
   toSnapshot() {
@@ -227,12 +241,14 @@ export default class LoroDocument {
 
   _setIfChanged(container, key, value) {
     if (!container || typeof container.get !== "function" || typeof container.set !== "function") {
-      return;
+      return false;
     }
     const current = container.get(key);
     if (current !== value) {
       container.set(key, value);
+      return true;
     }
+    return false;
   }
 
   _generateFallbackId() {

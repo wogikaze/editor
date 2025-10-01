@@ -128,7 +128,6 @@ export default class CollaborationClient {
       try {
         const initialSnapshot = this.editor.createStateSnapshot();
         this.lastAppliedSnapshot = initialSnapshot;
-        this.loro.applySnapshot(initialSnapshot);
       } catch (error) {
         console.warn("Failed to seed Loro document from editor", error);
       }
