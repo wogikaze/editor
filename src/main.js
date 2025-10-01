@@ -1,4 +1,4 @@
-import CanvasEditor from "./editor-core.js";
+import CanvasEditor from "./editor/index.js";
 
 document.addEventListener("DOMContentLoaded", () => {
   const canvas = document.getElementById("editor-canvas");

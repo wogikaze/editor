@@ -1,5 +1,12 @@
-import CanvasRenderer from "./editor-renderer.js";
-import SearchController from "./search-controller.js";
+import CanvasRenderer from "../renderer/canvas-renderer.js";
+import SearchController from "../dom-ui/search-controller.js";
+import { handleCtrlShortcuts as handleCtrlShortcutsCommand } from "../input-handler/keyboard-shortcuts.js";
+import {
+  handleLeadingSpaceIndentInput as handleLeadingSpaceIndentInputCommand,
+  processCommittedText as processCommittedTextCommand,
+} from "../input-handler/text-input.js";
+import { findWordBoundary as findWordBoundaryPoint } from "../input-handler/word-boundary.js";
+import { clamp, normalizeNewlines } from "../util/index.js";
 
 class CanvasEditor extends CanvasRenderer {
   constructor(canvas, textarea) {
@@ -372,11 +379,11 @@ class CanvasEditor extends CanvasRenderer {
       e.preventDefault();
       const maxScrollY = this.getMaxScroll();
       const nextY = this.state.view.scrollTop + e.deltaY;
-      this.state.view.scrollTop = Math.max(0, Math.min(maxScrollY, nextY));
+      this.state.view.scrollTop = clamp(nextY, 0, maxScrollY);
 
       const maxScrollX = this.getMaxHorizontalScroll();
       const nextX = this.state.view.scrollLeft + e.deltaX;
-      this.state.view.scrollLeft = Math.max(0, Math.min(maxScrollX, nextX));
+      this.state.view.scrollLeft = clamp(nextX, 0, maxScrollX);
     }
 
     onInput(e) {
@@ -392,30 +399,11 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     processCommittedText(text) {
-      if (!text) return false;
-      const normalized = text.replace(/\r\n/g, "\n");
-      if (this.handleLeadingSpaceIndentInput(normalized)) {
-        return true;
-      }
-      this.insertText(normalized);
-      return true;
+      return processCommittedTextCommand(this, text);
     }
 
     handleLeadingSpaceIndentInput(text) {
-      if (!text) return false;
-      const segments = text.split("\n");
-      const first = segments[0];
-      const hasExtraContent = segments.slice(1).some((segment) => segment.length > 0);
-      if (!first || !/^[ \u3000]+$/.test(first)) return false;
-      if (hasExtraContent) return false;
-      if (this.state.cursor.charIndex !== 0) return false;
-      const count = Array.from(first).length;
-      if (count === 0) return false;
-      this.changeIndent(count, {
-        applyToSelection: this.hasSelection(),
-        includeChildren: false,
-      });
-      return true;
+      return handleLeadingSpaceIndentInputCommand(this, text);
     }
 
     onKeydown(e) {
@@ -544,84 +532,7 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     handleCtrlShortcuts(e, key, shift) {
-      const lower = key.toLowerCase();
-      switch (lower) {
-        case "a":
-          e.preventDefault();
-          this.selectAll();
-          return true;
-        case "z":
-          e.preventDefault();
-          if (shift) {
-            this.redo();
-          } else {
-            this.undo();
-          }
-          return true;
-        case "y":
-          e.preventDefault();
-          this.redo();
-          return true;
-        case "home":
-          e.preventDefault();
-          this.moveCursorToDocumentEdge("start", shift);
-          return true;
-        case "end":
-          e.preventDefault();
-          this.moveCursorToDocumentEdge("end", shift);
-          return true;
-        case "arrowup":
-          e.preventDefault();
-          this.moveLine(-1);
-          return true;
-        case "arrowdown":
-          e.preventDefault();
-          this.moveLine(1);
-          return true;
-        case "arrowleft":
-          e.preventDefault();
-          if (shift) {
-            this.moveCursorByWord(-1, true);
-          } else {
-            this.changeIndent(-1, {
-              applyToSelection: this.hasSelection(),
-              includeChildren: false,
-            });
-          }
-          return true;
-        case "arrowright":
-          e.preventDefault();
-          if (shift) {
-            this.moveCursorByWord(1, true);
-          } else {
-            this.changeIndent(1, {
-              applyToSelection: this.hasSelection(),
-              includeChildren: false,
-            });
-          }
-          return true;
-        case "enter":
-          e.preventDefault();
-          this.toggleCollapse(this.state.cursor.lineIndex);
-          return true;
-        case "tab":
-          e.preventDefault();
-          this.changeIndent(1, {
-            applyToSelection: this.hasSelection(),
-            includeChildren: false,
-          });
-          return true;
-        case "f":
-          e.preventDefault();
-          this.openSearchPanel({ prefillSelection: true });
-          return true;
-        case "x":
-        case "c":
-        case "v":
-          return false;
-        default:
-          return false;
-      }
+      return handleCtrlShortcutsCommand(this, e, key, shift);
     }
     onCopy(e) {
       const text = this.getSelectedText();
@@ -642,7 +553,7 @@ class CanvasEditor extends CanvasRenderer {
       e.preventDefault();
       const paste = e.clipboardData.getData("text/plain");
       if (!paste) return;
-      this.insertText(paste.replace(/\r\n/g, "\n"));
+      this.insertText(normalizeNewlines(paste));
     }
 
     insertText(text) {
@@ -1004,21 +915,7 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     findWordBoundary(text, index, direction) {
-      const isWord = (ch) => /[\w_]/.test(ch);
-      if (direction < 0) {
-        let i = Math.max(0, index - 1);
-        const targetType = isWord(text[i]);
-        while (i > 0 && isWord(text[i - 1]) === targetType) {
-          i -= 1;
-        }
-        return i;
-      }
-      let i = Math.min(text.length, index);
-      const targetType = isWord(text[i]) || isWord(text[i - 1]);
-      while (i < text.length && isWord(text[i]) === targetType) {
-        i += 1;
-      }
-      return i;
+      return findWordBoundaryPoint(text, index, direction);
     }
 
     changeIndent(delta, options = {}) {
@@ -1180,9 +1077,10 @@ class CanvasEditor extends CanvasRenderer {
     }
     setCursor(lineIndex, charIndex, options = {}) {
       const { resetSelection = true, scrollIntoView = true } = options;
-      lineIndex = Math.max(0, Math.min(this.state.lines.length - 1, lineIndex));
+      const maxLineIndex = Math.max(0, this.state.lines.length - 1);
+      lineIndex = clamp(lineIndex, 0, maxLineIndex);
       const line = this.state.lines[lineIndex];
-      charIndex = Math.max(0, Math.min(line.text.length, charIndex));
+      charIndex = clamp(charIndex, 0, line.text.length);
       this.state.cursor = { lineIndex, charIndex };
       if (resetSelection) {
         this.state.selection = null;
