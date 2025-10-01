@@ -64,7 +64,24 @@ export class CanvasRenderer {
     if (this.textarea) {
       this.textarea.style.font = this.state.view.font;
       this.textarea.style.lineHeight = `${Math.round(this.typography.cursorHeight)}px`;
-      this.textarea.style.height = `${Math.max(1, Math.round(this.typography.cursorHeight))}px`;
+      const minHeight = Math.max(1, Math.round(this.typography.cursorHeight));
+      this.textarea.dataset.minHeight = `${minHeight}`;
+      this.textarea.style.minHeight = `${minHeight}px`;
+      this.textarea.style.height = "auto";
+      const minWidth = 320;
+      const dynamicWidth = Math.round(this.typography.cursorHeight * 12);
+      this.textarea.style.width = `${Math.max(minWidth, dynamicWidth)}px`;
+      this.textarea.style.minWidth = `${minWidth}px`;
+    }
+    if (this.canvas && this.config) {
+      const availableHeight = Math.max(
+        1,
+        this.canvas.height - this.config.padding * 2
+      );
+      this.visibleLineCapacity = Math.max(
+        1,
+        Math.floor(availableHeight / Math.max(1, this.state.view.lineHeight))
+      );
     }
   }
 

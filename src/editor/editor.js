@@ -307,23 +307,19 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     init() {
+      this.updateCanvasSize();
       this.ctx.font = this.state.view.font;
       this.ctx.textBaseline = "alphabetic";
       this.updateTypographyMetrics();
-      this.visibleLineCapacity = Math.max(
-        1,
-        Math.floor(
-          (this.canvas.height - this.config.padding * 2) /
-          this.state.view.lineHeight
-        )
-      );
       this.bindEvents();
       this.searchController.init();
       if (document.fonts && document.fonts.ready) {
         document.fonts
           .ready
           .then(() => {
+            this.updateCanvasSize();
             this.updateTypographyMetrics();
+            this.clampViewOffsets();
             this.invalidateLayout();
           })
           .catch(() => {});
@@ -336,6 +332,46 @@ class CanvasEditor extends CanvasRenderer {
       if (!match) return 16;
       return parseFloat(match[1]);
   }
+
+    updateCanvasSize() {
+      if (!this.canvas) return false;
+      const container = this.container || this.canvas.parentElement;
+      const targetWidth = Math.max(
+        1,
+        Math.floor(container ? container.clientWidth : this.canvas.clientWidth)
+      );
+      const targetHeight = Math.max(
+        1,
+        Math.floor(container ? container.clientHeight : this.canvas.clientHeight)
+      );
+      if (!Number.isFinite(targetWidth) || !Number.isFinite(targetHeight)) {
+        return false;
+      }
+      const changed =
+        this.canvas.width !== targetWidth || this.canvas.height !== targetHeight;
+      if (changed) {
+        this.canvas.width = targetWidth;
+        this.canvas.height = targetHeight;
+        this.canvas.style.width = `${targetWidth}px`;
+        this.canvas.style.height = `${targetHeight}px`;
+        this.ctx.font = this.state.view.font;
+        this.ctx.textBaseline = "alphabetic";
+      }
+      return changed;
+    }
+
+    clampViewOffsets() {
+      this.state.view.scrollTop = clamp(
+        this.state.view.scrollTop,
+        0,
+        this.getMaxScroll()
+      );
+      this.state.view.scrollLeft = clamp(
+        this.state.view.scrollLeft,
+        0,
+        this.getMaxHorizontalScroll()
+      );
+    }
 
     bindEvents() {
       this.canvas.addEventListener("mousedown", this.onMouseDown.bind(this));
@@ -381,6 +417,12 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     handleWindowResize() {
+      const resized = this.updateCanvasSize();
+      this.updateTypographyMetrics();
+      if (resized) {
+        this.clampViewOffsets();
+      }
+      this.invalidateLayout();
       this.searchController.scheduleLayoutUpdate();
     }
 
@@ -1718,6 +1760,15 @@ class CanvasEditor extends CanvasRenderer {
       const { screenX, screenCursorTop } = this.getCursorCoords();
       this.textarea.style.left = `${screenX}px`;
       this.textarea.style.top = `${screenCursorTop}px`;
+      this.textarea.style.height = "auto";
+      const minHeight = Number(this.textarea.dataset.minHeight || 0);
+      const measured = this.textarea.scrollHeight;
+      if (Number.isFinite(measured) && measured > 0) {
+        const target = Math.max(minHeight, measured);
+        this.textarea.style.height = `${target}px`;
+      } else if (minHeight > 0) {
+        this.textarea.style.height = `${minHeight}px`;
+      }
     }
 
     ensureCursorVisibleWhileDragging(mouseX, mouseY) {
