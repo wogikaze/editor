@@ -1,3 +1,5 @@
+import LoroDocument from "./loro-document.js";
+
 const DEFAULT_COLORS = [
   "#ef4444",
   "#f59e0b",
@@ -55,6 +57,46 @@ function clonePresence(presence) {
   };
 }
 
+function generatePeerId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `peer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function uint8ArrayToBase64(bytes) {
+  if (!(bytes instanceof Uint8Array)) return "";
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("base64");
+  }
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8Array(base64) {
+  if (!base64) return null;
+  if (typeof Buffer !== "undefined") {
+    return new Uint8Array(Buffer.from(base64, "base64"));
+  }
+  try {
+    const binary = atob(base64);
+    const length = binary.length;
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch (error) {
+    console.warn("Failed to decode base64 payload", error);
+    return null;
+  }
+}
+
 export default class CollaborationClient {
   constructor(editor, options = {}) {
     this.editor = editor;
@@ -64,7 +106,6 @@ export default class CollaborationClient {
     this.maxReconnectDelay = 10000;
     this.reconnectTimer = null;
     this.socket = null;
-    this.pendingDocument = null;
     this.isDisposed = false;
     this.clientId = null;
     this.peerPresence = new Map();
@@ -74,10 +115,27 @@ export default class CollaborationClient {
       : DEFAULT_COLORS;
     this.lastPresenceSerialized = null;
     this.presenceTimer = null;
+    this.pendingUpdates = [];
+    this.localUpdateUnsubscribe = null;
+    this.lastAppliedSnapshot = null;
+
+    this.loro = new LoroDocument({ peerId: generatePeerId() });
+    this.localUpdateUnsubscribe = this.loro.subscribeLocalUpdates((bytes) => {
+      this.handleLocalLoroUpdate(bytes);
+    });
+
+    if (this.editor && typeof this.editor.createStateSnapshot === "function") {
+      try {
+        const initialSnapshot = this.editor.createStateSnapshot();
+        this.lastAppliedSnapshot = initialSnapshot;
+        this.loro.applySnapshot(initialSnapshot);
+      } catch (error) {
+        console.warn("Failed to seed Loro document from editor", error);
+      }
+    }
 
     this.unsubscribe = this.editor.addDocumentChangeListener((documentState) => {
-      this.pendingDocument = documentState;
-      this.flushPending();
+      this.handleLocalDocumentChange(documentState);
     });
 
     if (!("WebSocket" in window)) {
@@ -99,7 +157,7 @@ export default class CollaborationClient {
       this.reconnectDelay = 1000;
       if (this.clientId) {
         this.sendPresenceUpdate(true);
-        this.flushPending(true);
+        this.flushPendingUpdates();
       }
     });
 
@@ -127,17 +185,14 @@ export default class CollaborationClient {
       case "welcome":
         this.handleWelcome(message);
         break;
-      case "update":
-        this.handleDocumentUpdate(message);
+      case "loro-update":
+        this.handleLoroNetworkUpdate(message);
         break;
       case "presence":
         this.handlePresence(message);
         break;
       case "peer-left":
         this.handlePeerLeft(message);
-        break;
-      case "init": // legacy support
-        this.handleDocumentUpdate(message);
         break;
       case "pong":
         break;
@@ -147,37 +202,69 @@ export default class CollaborationClient {
   }
 
   handleWelcome(message) {
-    const { clientId, document, peers } = message;
+    const { clientId, peers } = message;
     if (!clientId) return;
     this.clientId = clientId;
-    if (document) {
-      this.editor.applyExternalDocument(document, {
-        preserveView: false,
-        preserveCursor: false,
-      });
-    }
+
     if (Array.isArray(peers)) {
       peers.forEach((peer) => {
         if (!peer || peer.clientId === this.clientId) return;
         this.updatePeerPresence(peer.clientId, peer.presence);
       });
     }
+
+    if (message.loroSnapshot) {
+      const bytes = base64ToUint8Array(message.loroSnapshot);
+      if (bytes) {
+        this.applyRemoteBytes(bytes, {
+          preserveView: false,
+          preserveCursor: false,
+        });
+      }
+    }
+
     this.startPresenceLoop();
-    this.flushPending(true);
+    this.flushPendingUpdates();
     this.sendPresenceUpdate(true);
   }
 
-  handleDocumentUpdate(message) {
-    const { clientId, document, presence } = message;
+  handleLoroNetworkUpdate(message) {
+    const { clientId, update } = message;
     if (!clientId || clientId === this.clientId) return;
-    if (document) {
-      this.editor.applyExternalDocument(document, {
-        preserveView: true,
-        preserveCursor: true,
-      });
+    if (update) {
+      const bytes = base64ToUint8Array(update);
+      if (bytes) {
+        this.applyRemoteBytes(bytes, {
+          preserveView: true,
+          preserveCursor: true,
+        });
+      }
     }
-    if (presence) {
-      this.updatePeerPresence(clientId, presence);
+    if (message.presence) {
+      this.updatePeerPresence(clientId, message.presence);
+    }
+  }
+
+  applyRemoteBytes(bytes, options = {}) {
+    if (!(bytes instanceof Uint8Array)) return;
+    try {
+      this.loro.importUpdate(bytes);
+      const snapshot = this.loro.toSnapshot();
+      this.lastAppliedSnapshot = snapshot;
+      const preserveView = options.preserveView ?? true;
+      const preserveCursor = options.preserveCursor ?? true;
+      this.editor.applyExternalDocument(
+        {
+          version: this.loro.getVersion(),
+          snapshot,
+        },
+        {
+          preserveView,
+          preserveCursor,
+        }
+      );
+    } catch (error) {
+      console.error("Failed to apply remote update", error);
     }
   }
 
@@ -194,6 +281,60 @@ export default class CollaborationClient {
     this.peerColors.delete(clientId);
     if (this.editor && typeof this.editor.clearRemotePresence === "function") {
       this.editor.clearRemotePresence(clientId);
+    }
+  }
+
+  handleLocalDocumentChange(documentState) {
+    if (!documentState || !documentState.snapshot) return;
+    this.lastAppliedSnapshot = documentState.snapshot;
+    try {
+      this.loro.applySnapshot(documentState.snapshot);
+    } catch (error) {
+      console.error("Failed to sync local snapshot into Loro", error);
+    }
+  }
+
+  handleLocalLoroUpdate(bytes) {
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
+      return;
+    }
+    if (!this.clientId || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      this.pendingUpdates.push(bytes.slice());
+      return;
+    }
+    this.sendLoroUpdate(bytes);
+  }
+
+  sendLoroUpdate(bytes) {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    if (!this.clientId) return;
+    const encoded = uint8ArrayToBase64(bytes);
+    if (!encoded) return;
+    const message = {
+      type: "loro-update",
+      clientId: this.clientId,
+      update: encoded,
+      version: this.loro.getVersion(),
+    };
+    const presence = this.collectPresenceState();
+    if (presence) {
+      message.presence = presence;
+    }
+    try {
+      this.socket.send(JSON.stringify(message));
+    } catch (error) {
+      console.error("Failed to send collaboration update", error);
+    }
+  }
+
+  flushPendingUpdates() {
+    if (!this.clientId) return;
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    while (this.pendingUpdates.length > 0) {
+      const bytes = this.pendingUpdates.shift();
+      if (bytes) {
+        this.sendLoroUpdate(bytes);
+      }
     }
   }
 
@@ -227,31 +368,6 @@ export default class CollaborationClient {
       }
     }
     return presence;
-  }
-
-  flushPending(force = false) {
-    if (!this.pendingDocument) return;
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-      if (force) {
-        this.log("Unable to send document, socket not open yet");
-      }
-      return;
-    }
-    if (!this.clientId) {
-      return;
-    }
-    const message = {
-      type: "document",
-      clientId: this.clientId,
-      document: this.pendingDocument,
-      presence: this.collectPresenceState(),
-    };
-    try {
-      this.socket.send(JSON.stringify(message));
-      this.pendingDocument = null;
-    } catch (error) {
-      console.error("Failed to send collaboration update", error);
-    }
   }
 
   sendPresenceUpdate(force = false) {
@@ -342,6 +458,10 @@ export default class CollaborationClient {
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = null;
+    }
+    if (this.localUpdateUnsubscribe) {
+      this.localUpdateUnsubscribe();
+      this.localUpdateUnsubscribe = null;
     }
     if (this.socket) {
       this.socket.close();

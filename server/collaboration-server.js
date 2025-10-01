@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
+import { LoroDoc } from "loro-crdt";
 
 const DEFAULT_PORT = Number.parseInt(
   process.env.COLLAB_PORT ?? process.env.PORT ?? "8080",
@@ -10,9 +11,22 @@ const server = createServer();
 const wss = new WebSocketServer({ server });
 
 let nextClientId = 1;
-let latestDocument = null;
 const presenceByClient = new Map();
 const socketToClientId = new Map();
+const loroDoc = new LoroDoc();
+
+function encodeBase64(bytes) {
+  return Buffer.from(bytes).toString("base64");
+}
+
+function decodeBase64(encoded) {
+  try {
+    return Buffer.from(encoded, "base64");
+  } catch (error) {
+    console.warn("Failed to decode base64", error);
+    return null;
+  }
+}
 
 function sendJson(target, message) {
   if (!target || target.readyState !== WebSocket.OPEN) return;
@@ -44,10 +58,11 @@ wss.on("connection", (socket) => {
   socketToClientId.set(socket, clientId);
   console.log(`Client connected: ${clientId}`);
 
+  const snapshotBytes = loroDoc.export({ mode: "snapshot" });
   sendJson(socket, {
     type: "welcome",
     clientId,
-    document: latestDocument,
+    loroSnapshot: encodeBase64(snapshotBytes),
     peers: buildPeersSnapshot(clientId),
   });
 
@@ -67,23 +82,29 @@ wss.on("connection", (socket) => {
     }
 
     switch (message.type) {
-      case "document": {
-        if (message.document) {
-          latestDocument = message.document;
+      case "loro-update": {
+        if (typeof message.update !== "string" || message.update.length === 0) {
+          break;
+        }
+        const decoded = decodeBase64(message.update);
+        if (!decoded) {
+          break;
+        }
+        try {
+          loroDoc.import(decoded);
+        } catch (error) {
+          console.error("Failed to import Loro update", error);
+          break;
         }
         if (message.presence) {
           presenceByClient.set(clientId, message.presence);
-          broadcast({
-            type: "presence",
-            clientId,
-            presence: message.presence,
-          }, socket);
         }
         broadcast({
-          type: "update",
+          type: "loro-update",
           clientId,
-          document: message.document ?? null,
+          update: message.update,
           presence: message.presence ?? null,
+          version: message.version ?? null,
         }, socket);
         break;
       }
