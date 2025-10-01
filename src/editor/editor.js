@@ -6,7 +6,7 @@ import {
   processCommittedText as processCommittedTextCommand,
 } from "../input-handler/text-input.js";
 import { findWordBoundary as findWordBoundaryPoint } from "../input-handler/word-boundary.js";
-import { clamp, normalizeNewlines } from "../util/index.js";
+import { clamp, normalizeNewlines, colorWithAlpha } from "../util/index.js";
 
 class CanvasEditor extends CanvasRenderer {
   constructor(canvas, textarea) {
@@ -56,6 +56,10 @@ class CanvasEditor extends CanvasRenderer {
     this.documentVersion = 0;
     this.searchController = new SearchController(this);
     this.skipNextInputCommit = false;
+
+    this.documentChangeListeners = new Set();
+    this.isApplyingRemoteUpdate = false;
+    this.remotePresence = new Map();
 
     this.handleWindowResize = this.handleWindowResize.bind(this);
 
@@ -123,6 +127,168 @@ class CanvasEditor extends CanvasRenderer {
           .catch(() => {});
       }
       requestAnimationFrame(this.renderLoop.bind(this));
+    }
+
+    addDocumentChangeListener(listener) {
+      if (typeof listener !== "function") {
+        return () => {};
+      }
+      if (!this.documentChangeListeners) {
+        this.documentChangeListeners = new Set();
+      }
+      this.documentChangeListeners.add(listener);
+      return () => {
+        if (!this.documentChangeListeners) return;
+        this.documentChangeListeners.delete(listener);
+      };
+    }
+
+    emitDocumentChange() {
+      if (!this.documentChangeListeners || this.documentChangeListeners.size === 0) {
+        return;
+      }
+      const payload = {
+        version: this.documentVersion,
+        snapshot: this.createStateSnapshot(),
+      };
+      this.documentChangeListeners.forEach((listener) => {
+        try {
+          listener(payload);
+        } catch (error) {
+          console.error("Document change listener failed", error);
+        }
+      });
+    }
+
+    applyExternalDocument(documentState, options = {}) {
+      if (!documentState || !documentState.snapshot) return;
+      const { snapshot, version } = documentState;
+      const { preserveView = true, preserveCursor = true } = options;
+      const previousCursor = preserveCursor ? { ...this.state.cursor } : null;
+      const previousSelection =
+        preserveCursor && this.state.selection
+          ? {
+            start: { ...this.state.selection.start },
+            end: { ...this.state.selection.end },
+          }
+          : null;
+      const previousView = preserveView
+        ? {
+          scrollTop: this.state.view.scrollTop,
+          scrollLeft: this.state.view.scrollLeft,
+        }
+        : null;
+
+      this.isApplyingRemoteUpdate = true;
+      const snapshotForApply = {
+        ...snapshot,
+        scrollTop:
+          snapshot.scrollTop ?? previousView?.scrollTop ?? this.state.view.scrollTop,
+        scrollLeft:
+          snapshot.scrollLeft ?? previousView?.scrollLeft ?? this.state.view.scrollLeft,
+      };
+      this.applySnapshot(snapshotForApply);
+      if (typeof version === "number" && Number.isFinite(version)) {
+        this.documentVersion = version;
+      }
+      this.isApplyingRemoteUpdate = false;
+
+      if (preserveView && previousView) {
+        this.state.view.scrollTop = previousView.scrollTop;
+        this.state.view.scrollLeft = previousView.scrollLeft;
+      }
+
+      if (preserveCursor && previousCursor) {
+        const clampedCursor = this.clampPointToDocument(previousCursor);
+        const clampedSelection = previousSelection
+          ? {
+            start: this.clampPointToDocument(previousSelection.start),
+            end: this.clampPointToDocument(previousSelection.end),
+          }
+          : null;
+        this.state.cursor = clampedCursor;
+        if (
+          clampedSelection &&
+          (clampedSelection.start.lineIndex !== clampedSelection.end.lineIndex ||
+            clampedSelection.start.charIndex !== clampedSelection.end.charIndex)
+        ) {
+          this.state.selection = clampedSelection;
+          this.selectionAnchor = { ...clampedSelection.start };
+        } else {
+          this.state.selection = null;
+          this.selectionAnchor = { ...clampedCursor };
+        }
+      }
+
+      this.invalidateLayout();
+      this.resetCursorBlink();
+    }
+
+    getPresenceState() {
+      return {
+        documentVersion: this.documentVersion,
+        cursor: { ...this.state.cursor },
+        selection: this.getNormalizedSelection(),
+      };
+    }
+
+    setRemotePresence(peerId, presence = {}) {
+      if (!peerId) return;
+      const cursor = presence.cursor ? this.clampPointToDocument(presence.cursor) : null;
+      const normalizedSelection = this.normalizeExternalSelection(presence.selection);
+      const selection = normalizedSelection
+        ? {
+          start: this.clampPointToDocument(normalizedSelection.start),
+          end: this.clampPointToDocument(normalizedSelection.end),
+        }
+        : null;
+      if (!cursor && !selection) {
+        this.remotePresence.delete(peerId);
+        return;
+      }
+      const color = presence.color || "#3fb950";
+      const selectionColor = presence.selectionColor || colorWithAlpha(color, 0.25);
+      const label = presence.label || peerId;
+      this.remotePresence.set(peerId, {
+        cursor,
+        selection,
+        color,
+        selectionColor,
+        label,
+      });
+    }
+
+    clearRemotePresence(peerId) {
+      if (!peerId) return;
+      this.remotePresence.delete(peerId);
+    }
+
+    normalizeExternalSelection(selection) {
+      if (!selection || !selection.start || !selection.end) {
+        return null;
+      }
+      const start = {
+        lineIndex: clamp(Number(selection.start.lineIndex) || 0, 0, this.state.lines.length),
+        charIndex: clamp(Number(selection.start.charIndex) || 0, 0, Infinity),
+      };
+      const end = {
+        lineIndex: clamp(Number(selection.end.lineIndex) || 0, 0, this.state.lines.length),
+        charIndex: clamp(Number(selection.end.charIndex) || 0, 0, Infinity),
+      };
+      if (this.comparePoints(start, end) <= 0) {
+        return { start, end };
+      }
+      return { start: end, end: start };
+    }
+
+    clampPointToDocument(point) {
+      if (!point) return null;
+      const maxLineIndex = Math.max(0, this.state.lines.length - 1);
+      const lineIndex = clamp(Number(point.lineIndex) || 0, 0, maxLineIndex);
+      const line = this.state.lines[lineIndex];
+      const maxCharIndex = line ? line.text.length : 0;
+      const charIndex = clamp(Number(point.charIndex) || 0, 0, maxCharIndex);
+      return { lineIndex, charIndex };
     }
 
     getFontPixelSize() {
@@ -951,6 +1117,7 @@ class CanvasEditor extends CanvasRenderer {
       if (!this.hasChildren(lineIndex)) return;
       this.saveHistory();
       line.collapsed = !line.collapsed;
+      this.markDocumentVersion();
       this.invalidateLayout();
       if (line.collapsed && !this.isVisible(this.state.cursor.lineIndex)) {
         this.setCursor(
@@ -1094,9 +1261,11 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     getCursorCoords() {
-      const lineIndex = this.state.cursor.lineIndex;
-      const visibleIndex = this.getVisibleIndex(lineIndex);
-      if (visibleIndex === -1) {
+      const coords = this.getCursorCoordsFor(
+        this.state.cursor.lineIndex,
+        this.state.cursor.charIndex
+      );
+      if (!coords) {
         return {
           x: 0,
           worldX: 0,
@@ -1109,12 +1278,20 @@ class CanvasEditor extends CanvasRenderer {
           line: null,
         };
       }
+      return coords;
+    }
+
+    getCursorCoordsFor(lineIndex, charIndex) {
+      const visibleIndex = this.getVisibleIndex(lineIndex);
+      if (visibleIndex === -1) {
+        return null;
+      }
       const line = this.state.lines[lineIndex];
-      const textBefore = line.text.slice(0, this.state.cursor.charIndex);
+      if (!line) return null;
       const indentX =
         this.config.padding + line.indent * this.state.view.indentWidth;
-      const worldX =
-        indentX + this.measureText(textBefore);
+      const textBefore = line.text.slice(0, clamp(charIndex, 0, line.text.length));
+      const worldX = indentX + this.measureText(textBefore);
       const worldLineTop =
         this.config.padding + visibleIndex * this.state.view.lineHeight;
       const worldCursorTop = worldLineTop + this.typography.paddingTop;
@@ -1133,6 +1310,96 @@ class CanvasEditor extends CanvasRenderer {
         worldBaseline,
         line,
       };
+    }
+
+    renderRemoteSelections(lineIndex, y) {
+      if (!this.remotePresence || this.remotePresence.size === 0) return;
+      const line = this.state.lines[lineIndex];
+      if (!line) return;
+      const indentX = this.config.padding + line.indent * this.state.view.indentWidth;
+      const lineHeight = this.state.view.lineHeight;
+      const lineLength = line.text.length;
+
+      this.remotePresence.forEach((presence) => {
+        const { selection, selectionColor } = presence;
+        if (!selection) return;
+        const { start, end } = selection;
+        if (!start || !end) return;
+        if (lineIndex < start.lineIndex || lineIndex > end.lineIndex) return;
+
+        let startIndex = lineIndex === start.lineIndex ? clamp(start.charIndex, 0, lineLength) : 0;
+        let endIndex = lineIndex === end.lineIndex ? clamp(end.charIndex, 0, lineLength) : lineLength;
+
+        let selectionStartX = indentX;
+        let selectionEndX = indentX;
+
+        if (startIndex === endIndex && startIndex === 0 && lineIndex !== end.lineIndex) {
+          selectionEndX = indentX + this.measureText(line.text);
+        } else {
+          selectionStartX = indentX + this.measureText(line.text.slice(0, startIndex));
+          selectionEndX = indentX + this.measureText(line.text.slice(0, endIndex));
+        }
+
+        if (selectionEndX < selectionStartX) {
+          [selectionStartX, selectionEndX] = [selectionEndX, selectionStartX];
+        }
+
+        if (selectionEndX - selectionStartX <= 0) {
+          selectionEndX = selectionStartX + 2;
+        }
+
+        this.ctx.fillStyle = selectionColor || colorWithAlpha(presence.color, 0.2);
+        this.ctx.fillRect(selectionStartX, y, selectionEndX - selectionStartX, lineHeight);
+      });
+    }
+
+    renderRemoteCursors() {
+      if (!this.remotePresence || this.remotePresence.size === 0) return;
+      const caretWidth = Math.max(2, this.typography.spaceWidth * 0.6);
+      this.remotePresence.forEach((presence) => {
+        const { cursor } = presence;
+        if (!cursor) return;
+        const coords = this.getCursorCoordsFor(cursor.lineIndex, cursor.charIndex);
+        if (!coords) return;
+        this.ctx.fillStyle = presence.color || this.config.colors.cursor;
+        this.ctx.fillRect(
+          coords.worldX,
+          coords.worldLineTop,
+          caretWidth,
+          this.state.view.lineHeight
+        );
+        if (presence.label) {
+          this.renderRemoteCursorLabel(coords, presence);
+        }
+      });
+    }
+
+    renderRemoteCursorLabel(coords, presence) {
+      const label = `${presence.label ?? ""}`.trim();
+      if (!label) return;
+      this.ctx.save();
+      const fontSize = Math.max(10, Math.round(this.getFontPixelSize() * 0.55));
+      this.ctx.font = `${fontSize}px sans-serif`;
+      this.ctx.textBaseline = "top";
+      const paddingX = 6;
+      const paddingY = 3;
+      const metrics = this.ctx.measureText(label);
+      const textWidth = metrics.width;
+      const boxWidth = textWidth + paddingX * 2;
+      const boxHeight = fontSize + paddingY * 2;
+      const boxX = coords.worldX + paddingX;
+      const boxY = Math.max(
+        this.config.padding,
+        coords.worldLineTop - boxHeight - 2
+      );
+      this.ctx.fillStyle = colorWithAlpha(presence.color, 0.2);
+      this.ctx.fillRect(boxX, boxY, boxWidth, boxHeight);
+      this.ctx.strokeStyle = colorWithAlpha(presence.color, 0.6);
+      this.ctx.lineWidth = 1;
+      this.ctx.strokeRect(boxX, boxY, boxWidth, boxHeight);
+      this.ctx.fillStyle = presence.color;
+      this.ctx.fillText(label, boxX + paddingX, boxY + paddingY);
+      this.ctx.restore();
     }
 
     updateTextareaPosition() {
@@ -1494,6 +1761,9 @@ class CanvasEditor extends CanvasRenderer {
       this.documentVersion += 1;
       if (this.search) {
         this.search.needsUpdate = true;
+      }
+      if (!this.isApplyingRemoteUpdate) {
+        this.emitDocumentChange();
       }
     }
   }
