@@ -105,6 +105,7 @@ export class CanvasRenderer {
     });
 
     this.renderCursor();
+    this.renderRemoteCursors();
 
     if (this.isFocused && this.isComposing) {
       this.renderCompositionText();
@@ -117,9 +118,15 @@ export class CanvasRenderer {
     this.renderIndentBackground(line, y);
     this.renderSearchHighlights(lineIndex, y);
     this.renderSelection(lineIndex, y);
+    this.renderRemoteSelections(lineIndex, y);
     this.renderCollapseIcon(line, lineIndex, y);
     this.renderLineText(line, lineIndex, y);
   }
+
+  // Hooks for subclasses to overlay remote collaborator presence.
+  renderRemoteSelections(_lineIndex, _y) {}
+
+  renderRemoteCursors() {}
 
   renderIndentBackground(line, y) {
     const indentWidth = this.state.view.indentWidth;

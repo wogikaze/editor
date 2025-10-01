@@ -2,6 +2,11 @@
   "name": "wgkz-editor",
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "start:server": "node server/collaboration-server.js"
+  },
+  "dependencies": {
+    "loro-crdt": "^1.8.1",
+    "ws": "^8.15.1"
   }
 }
