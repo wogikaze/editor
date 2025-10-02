@@ -39,6 +39,7 @@ canvas {
   display: block;
   background-color: #282c34;
   cursor: text;
+  touch-action: none;
 }
 
 /* --- IMEやキーボード入力処理用の非表示テキストエリア --- */

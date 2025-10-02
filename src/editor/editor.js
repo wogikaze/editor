@@ -60,6 +60,10 @@ class CanvasEditor extends CanvasRenderer {
     this.documentChangeListeners = new Set();
     this.isApplyingRemoteUpdate = false;
     this.remotePresence = new Map();
+    this.supportsPointerEvents =
+      typeof window !== "undefined" && typeof window.PointerEvent !== "undefined";
+    this.activePointerId = null;
+    this.activeTouchId = null;
 
     this.handleWindowResize = this.handleWindowResize.bind(this);
 
@@ -301,6 +305,33 @@ class CanvasEditor extends CanvasRenderer {
       this.canvas.addEventListener("mousedown", this.onMouseDown.bind(this));
       this.canvas.addEventListener("mousemove", this.onMouseMove.bind(this));
       window.addEventListener("mouseup", this.onMouseUp.bind(this));
+      if (this.supportsPointerEvents) {
+        this.canvas.addEventListener(
+          "pointerdown",
+          this.onPointerDown.bind(this),
+          { passive: false }
+        );
+        this.canvas.addEventListener(
+          "pointermove",
+          this.onPointerMove.bind(this),
+          { passive: false }
+        );
+        window.addEventListener("pointerup", this.onPointerUp.bind(this));
+        window.addEventListener("pointercancel", this.onPointerUp.bind(this));
+      } else {
+        this.canvas.addEventListener(
+          "touchstart",
+          this.onTouchStart.bind(this),
+          { passive: false }
+        );
+        this.canvas.addEventListener(
+          "touchmove",
+          this.onTouchMove.bind(this),
+          { passive: false }
+        );
+        window.addEventListener("touchend", this.onTouchEnd.bind(this));
+        window.addEventListener("touchcancel", this.onTouchEnd.bind(this));
+      }
       this.canvas.addEventListener("click", this.onClick.bind(this));
       this.canvas.addEventListener("wheel", this.onWheel.bind(this), {
         passive: false,
@@ -477,30 +508,41 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     onMouseDown(e) {
-      e.preventDefault();
+      if (this.activePointerId !== null) return;
+      this.handlePointerDown(e, e.offsetX, e.offsetY);
+    }
+
+    onMouseMove(e) {
+      this.handlePointerMove(e, e.offsetX, e.offsetY);
+    }
+
+    onMouseUp() {
+      this.handlePointerUp();
+    }
+
+    handlePointerDown(event, offsetX, offsetY) {
+      event.preventDefault();
       this.focus();
       this.draggedDuringClick = false;
       this.ignoreNextClick = false;
-      const { lineIndex, charIndex, clickedIcon } = this.hitTest(
-        e.offsetX,
-        e.offsetY
-      );
-      if (lineIndex === null) return;
+      const { lineIndex, charIndex, clickedIcon } = this.hitTest(offsetX, offsetY);
+      if (lineIndex === null) return false;
       if (clickedIcon) {
         this.ignoreNextClick = true;
         this.toggleCollapse(lineIndex);
-        return;
+        return false;
       }
       this.setCursor(lineIndex, charIndex);
       this.selectionAnchor = { ...this.state.cursor };
       this.isDragging = true;
+      return true;
     }
 
-    onMouseMove(e) {
+    handlePointerMove(event, offsetX, offsetY) {
       if (!this.isDragging) return;
-      e.preventDefault();
+      event.preventDefault();
       this.draggedDuringClick = true;
-      const hit = this.hitTest(e.offsetX, e.offsetY);
+      const hit = this.hitTest(offsetX, offsetY);
       if (hit.lineIndex === null) return;
       this.setCursor(hit.lineIndex, hit.charIndex, {
         resetSelection: false,
@@ -512,12 +554,116 @@ class CanvasEditor extends CanvasRenderer {
           end: { ...this.state.cursor },
         };
       }
-      this.ensureCursorVisibleWhileDragging(e.offsetX, e.offsetY);
+      this.ensureCursorVisibleWhileDragging(offsetX, offsetY);
     }
 
-    onMouseUp() {
+    handlePointerUp() {
       this.isDragging = false;
       this.preferredCursorX = -1;
+    }
+
+    getPointerOffsets(event) {
+      if (
+        typeof event.offsetX === "number" &&
+        typeof event.offsetY === "number"
+      ) {
+        return { offsetX: event.offsetX, offsetY: event.offsetY };
+      }
+      const rect = this.canvas.getBoundingClientRect();
+      return {
+        offsetX: event.clientX - rect.left,
+        offsetY: event.clientY - rect.top,
+      };
+    }
+
+    getTouchOffsets(touch) {
+      const rect = this.canvas.getBoundingClientRect();
+      return {
+        offsetX: touch.clientX - rect.left,
+        offsetY: touch.clientY - rect.top,
+      };
+    }
+
+    onPointerDown(event) {
+      if (!event.isPrimary || event.pointerType === "mouse") return;
+      const { offsetX, offsetY } = this.getPointerOffsets(event);
+      const started = this.handlePointerDown(event, offsetX, offsetY);
+      if (started) {
+        this.activePointerId = event.pointerId;
+        if (typeof this.canvas.setPointerCapture === "function") {
+          try {
+            this.canvas.setPointerCapture(event.pointerId);
+          } catch (_error) {}
+        }
+      }
+    }
+
+    onPointerMove(event) {
+      if (
+        event.pointerType === "mouse" ||
+        this.activePointerId === null ||
+        event.pointerId !== this.activePointerId
+      ) {
+        return;
+      }
+      const { offsetX, offsetY } = this.getPointerOffsets(event);
+      this.handlePointerMove(event, offsetX, offsetY);
+    }
+
+    onPointerUp(event) {
+      if (
+        event.pointerType === "mouse" ||
+        this.activePointerId === null ||
+        event.pointerId !== this.activePointerId
+      ) {
+        return;
+      }
+      if (typeof this.canvas.releasePointerCapture === "function") {
+        try {
+          this.canvas.releasePointerCapture(event.pointerId);
+        } catch (_error) {}
+      }
+      this.handlePointerUp();
+      this.activePointerId = null;
+    }
+
+    onTouchStart(event) {
+      if (event.changedTouches.length === 0) return;
+      const touch = event.changedTouches[0];
+      this.activeTouchId = touch.identifier;
+      const { offsetX, offsetY } = this.getTouchOffsets(touch);
+      const started = this.handlePointerDown(event, offsetX, offsetY);
+      if (!started) {
+        this.activeTouchId = null;
+      }
+    }
+
+    onTouchMove(event) {
+      if (this.activeTouchId === null) return;
+      let touch = null;
+      for (let i = 0; i < event.touches.length; i += 1) {
+        if (event.touches[i].identifier === this.activeTouchId) {
+          touch = event.touches[i];
+          break;
+        }
+      }
+      if (!touch) return;
+      const { offsetX, offsetY } = this.getTouchOffsets(touch);
+      this.handlePointerMove(event, offsetX, offsetY);
+    }
+
+    onTouchEnd(event) {
+      if (this.activeTouchId === null) return;
+      let shouldEnd = false;
+      for (let i = 0; i < event.changedTouches.length; i += 1) {
+        if (event.changedTouches[i].identifier === this.activeTouchId) {
+          shouldEnd = true;
+          break;
+        }
+      }
+      if (!shouldEnd) return;
+      this.handlePointerUp();
+      this.activeTouchId = null;
     }
 
     onClick(e) {
