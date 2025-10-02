@@ -1872,16 +1872,48 @@ class CanvasEditor extends CanvasRenderer {
     }
 
     applySnapshot(snapshot) {
-      this.state.lines = snapshot.lines.map((line) => ({ ...line }));
-      this.state.cursor = { ...snapshot.cursor };
-      this.state.selection = snapshot.selection
-        ? {
-          start: { ...snapshot.selection.start },
-          end: { ...snapshot.selection.end },
+      const incomingLines = Array.isArray(snapshot.lines)
+        ? snapshot.lines.map((line) => ({
+          id: typeof line?.id === "string" && line.id.length > 0 ? line.id : CanvasEditor.generateId(),
+          text: typeof line?.text === "string" ? line.text : "",
+          indent: clamp(Number(line?.indent) || 0, 0, Infinity),
+          collapsed: Boolean(line?.collapsed),
+        }))
+        : [];
+      if (incomingLines.length === 0) {
+        incomingLines.push(this.createLine("", 0, false));
+      }
+      this.state.lines = incomingLines;
+
+      const clampedCursor = this.clampPointToDocument(
+        snapshot.cursor || { lineIndex: 0, charIndex: 0 }
+      ) || { lineIndex: 0, charIndex: 0 };
+      this.state.cursor = clampedCursor;
+
+      let selection = null;
+      if (snapshot.selection && snapshot.selection.start && snapshot.selection.end) {
+        const start = this.clampPointToDocument(snapshot.selection.start);
+        const end = this.clampPointToDocument(snapshot.selection.end);
+        if (start && end) {
+          if (this.comparePoints(start, end) <= 0) {
+            selection = { start, end };
+          } else {
+            selection = { start: end, end: start };
+          }
         }
-        : null;
-      this.state.view.scrollTop = snapshot.scrollTop;
-      this.state.view.scrollLeft = snapshot.scrollLeft ?? this.state.view.scrollLeft;
+      }
+      this.state.selection = selection;
+      this.selectionAnchor = selection ? { ...selection.start } : { ...clampedCursor };
+
+      const nextScrollTop = Number(snapshot.scrollTop);
+      this.state.view.scrollTop = Number.isFinite(nextScrollTop)
+        ? nextScrollTop
+        : this.state.view.scrollTop;
+      const nextScrollLeft = Number(snapshot.scrollLeft);
+      if (Number.isFinite(nextScrollLeft)) {
+        this.state.view.scrollLeft = nextScrollLeft;
+      }
+
       this.invalidateLayout();
       this.resetCursorBlink();
       this.markDocumentVersion();
